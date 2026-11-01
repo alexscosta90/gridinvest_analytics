@@ -2,6 +2,7 @@
 
 
 from pipeline.db import conectar
+from pipeline.ingestao_indger import COLUNAS_INDGER
 
 
 def transformar_pdd() -> dict[str, int]:
@@ -155,6 +156,144 @@ def transformar_pdd() -> dict[str, int]:
                 "anos_invalidos": invalidos[1],
                 "valores_realizados_invalidos": invalidos[2],
                 "valores_planejados_invalidos": invalidos[3],
+            }
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
+
+
+def transformar_indger() -> dict[str, int]:
+    """Cria ou substitui refined.indger_comerciais atomicamente.
+
+    Todas as linhas da RAW são preservadas. Os quatro campos tipados mantêm
+    o valor original em colunas ``_raw`` e recebem status ``valid``, ``null``
+    ou ``invalid``. Chaves repetidas e códigos IBGE ``0`` são sinalizados.
+    """
+    conversoes = {
+        "DatReferenciaInformada": "DATE",
+        "DatGeracaoConjuntoDados": "DATE",
+        "DthCarga": "TIMESTAMP",
+        "QtdUCAtiva": "BIGINT",
+    }
+    projecoes = []
+
+    for coluna in COLUNAS_INDGER:
+        identificador = f'"{coluna}"'
+        if coluna not in conversoes:
+            projecoes.append(identificador)
+            continue
+
+        tipo = conversoes[coluna]
+        valor_limpo = f"NULLIF(TRIM({identificador}), '')"
+        valor_convertido = f"TRY_CAST({valor_limpo} AS {tipo})"
+        status = (
+            "CASE "
+            f"WHEN {identificador} IS NULL OR TRIM({identificador}) = '' "
+            "THEN 'null' "
+            f"WHEN {valor_convertido} IS NULL THEN 'invalid' "
+            "ELSE 'valid' END "
+            f"AS \"{coluna}_status\""
+        )
+        projecoes.extend(
+            [
+                f"{valor_convertido} AS {identificador}",
+                f"{identificador} AS \"{coluna}_raw\"",
+                status,
+            ]
+        )
+
+    chave = '"NumCNPJ", "CodMunicipioIBGE", "DatReferenciaInformada"'
+    flag_ibge = (
+        "CASE WHEN TRIM(\"CodMunicipioIBGE\") = '0' "
+        "THEN TRUE ELSE FALSE END AS \"CodMunicipioIBGE_revisar\""
+    )
+    projecoes.extend(
+        [
+            flag_ibge,
+            f'(COUNT(*) OVER (PARTITION BY {chave}) > 1) AS "duplicidade_chave"',
+        ]
+    )
+    consulta_staging = (
+        "CREATE TEMP TABLE _indger_staging AS SELECT\n    "
+        + ",\n    ".join(projecoes)
+        + "\nFROM raw.indger_comerciais"
+    )
+
+    with conectar() as con:
+        con.execute("BEGIN TRANSACTION")
+
+        try:
+            total_origem = con.execute(
+                "SELECT COUNT(*) FROM raw.indger_comerciais"
+            ).fetchone()[0]
+            con.execute(consulta_staging)
+            total_staging = con.execute(
+                "SELECT COUNT(*) FROM _indger_staging"
+            ).fetchone()[0]
+
+            if total_origem != total_staging:
+                raise ValueError(
+                    "Contagem divergente: "
+                    f"raw.indger_comerciais={total_origem}, "
+                    f"staging={total_staging}."
+                )
+
+            con.execute("CREATE SCHEMA IF NOT EXISTS refined")
+            con.execute(
+                """
+                CREATE OR REPLACE TABLE refined.indger_comerciais AS
+                SELECT * FROM _indger_staging
+                """
+            )
+            total_destino = con.execute(
+                "SELECT COUNT(*) FROM refined.indger_comerciais"
+            ).fetchone()[0]
+            if total_destino != total_origem:
+                raise ValueError(
+                    "Contagem divergente após transformação: "
+                    f"raw.indger_comerciais={total_origem}, "
+                    f"refined.indger_comerciais={total_destino}."
+                )
+
+            diagnostico = con.execute(
+                """
+                SELECT
+                    COUNT(*) FILTER (
+                        WHERE DatReferenciaInformada_status = 'invalid'
+                    ),
+                    COUNT(*) FILTER (
+                        WHERE DatGeracaoConjuntoDados_status = 'invalid'
+                    ),
+                    COUNT(*) FILTER (WHERE DthCarga_status = 'invalid'),
+                    COUNT(*) FILTER (WHERE QtdUCAtiva_status = 'invalid'),
+                    COUNT(*) FILTER (WHERE CodMunicipioIBGE_revisar),
+                    COUNT(*) FILTER (WHERE duplicidade_chave)
+                FROM refined.indger_comerciais
+                """
+            ).fetchone()
+            grupos_repetidos = con.execute(
+                """
+                SELECT COUNT(*)
+                FROM (
+                    SELECT NumCNPJ, CodMunicipioIBGE, DatReferenciaInformada_raw
+                    FROM refined.indger_comerciais
+                    GROUP BY NumCNPJ, CodMunicipioIBGE, DatReferenciaInformada_raw
+                    HAVING COUNT(*) > 1
+                ) grupos
+                """
+            ).fetchone()[0]
+            con.execute("COMMIT")
+
+            return {
+                "linhas_origem": total_origem,
+                "linhas_destino": total_destino,
+                "referencias_invalidas": diagnostico[0],
+                "datas_geracao_invalidas": diagnostico[1],
+                "cargas_invalidas": diagnostico[2],
+                "uc_ativas_invalidas": diagnostico[3],
+                "ibge_zero_para_revisao": diagnostico[4],
+                "linhas_com_chave_repetida": diagnostico[5],
+                "grupos_chave_repetida": grupos_repetidos,
             }
         except Exception:
             con.execute("ROLLBACK")
