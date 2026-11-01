@@ -19,3 +19,6 @@ raw/*.parquet
 # Informações sensíveis
 .env
 .streamlit/secrets.toml
+
+# Arquivos temporarios dos testes
+tmp_pytest/
