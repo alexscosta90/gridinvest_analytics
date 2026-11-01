@@ -32,6 +32,83 @@ def validar_linha(linha: list[str], numero_linha: int) -> None:
         )
 
 
+def ingerir_csv(
+    caminho,
+    tabela,
+    separador,
+    colunas_esperadas,
+):
+    """Carrega um CSV para a camada RAW do DuckDB."""
+
+    if not caminho.is_file():
+        raise FileNotFoundError(f"Arquivo não encontrado: {caminho}")
+
+    # Somente nomes de tabelas permitidos
+    tabelas_permitidas = {"pdd", "indger_comerciais"}
+
+    if tabela not in tabelas_permitidas:
+        raise ValueError(f"Tabela não permitida: {tabela}")
+
+    with caminho.open(encoding="utf-8-sig", newline="") as arquivo:
+        leitor = csv.reader(arquivo, delimiter=separador)
+        colunas = next(leitor)
+
+        if colunas != colunas_esperadas:
+            raise ValueError("Cabeçalho diferente do esperado.")
+
+        with conectar() as con:
+            con.execute("BEGIN TRANSACTION")
+
+            try:
+                con.execute("CREATE SCHEMA IF NOT EXISTS raw")
+
+                definicao = ", ".join(f'"{coluna}" VARCHAR' for coluna in colunas)
+
+                con.execute(f'CREATE OR REPLACE TABLE raw."{tabela}" ({definicao})')
+
+                placeholders = ", ".join(["?"] * len(colunas))
+
+                sql_insert = f'INSERT INTO raw."{tabela}" VALUES ({placeholders})'
+
+                total_csv = 0
+                lote = []
+
+                for numero_linha, linha in enumerate(leitor, start=2):
+                    if len(linha) != len(colunas):
+                        raise ValueError(
+                            f"Linha {numero_linha}: "
+                            f"esperadas {len(colunas)} colunas, "
+                            f"encontradas {len(linha)}."
+                        )
+
+                    lote.append(linha)
+                    total_csv += 1
+
+                    if len(lote) == 1000:
+                        con.executemany(sql_insert, lote)
+                        lote.clear()
+
+                if lote:
+                    con.executemany(sql_insert, lote)
+
+                total_banco = con.execute(
+                    f'SELECT COUNT(*) FROM raw."{tabela}"'
+                ).fetchone()[0]
+
+                if total_csv != total_banco:
+                    raise ValueError("Contagem divergente entre CSV e DuckDB.")
+
+                con.execute("COMMIT")
+
+            except Exception:
+                con.execute("ROLLBACK")
+                raise
+
+    print(f"Ingestão da tabela {tabela} concluída!")
+    print(f"Registros: {total_banco}")
+    print(f"Colunas: {len(colunas)}")
+
+
 def ingerir_pdd() -> None:
     """Carrega o CSV original do PDD para a camada RAW."""
 
