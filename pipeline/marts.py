@@ -14,6 +14,7 @@ MART_03_SQL = BASE_DIR / "sql" / "marts" / "03_investimento_por_uc.sql"
 MART_04_SQL = BASE_DIR / "sql" / "marts" / "04_planejado_vs_realizado.sql"
 MART_05_SQL = BASE_DIR / "sql" / "marts" / "05_evolucao_investimentos.sql"
 MART_06_SQL = BASE_DIR / "sql" / "marts" / "06_ranking_investimentos.sql"
+MART_07_SQL = BASE_DIR / "sql" / "marts" / "07_ranking_por_uc.sql"
 ANOS_MART_01 = {2023, 2024, 2025}
 ESCOPOS_MART_01 = {"nacional", "top10"}
 
@@ -1027,6 +1028,326 @@ def _validar_mart_06(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
 def executar_mart_06() -> dict[str, int]:
     """Executa os rankings financeiros no executor transacional comum."""
     return executar_sql_mart(MART_06_SQL, _validar_mart_06)
+
+
+def _validar_chaves_uc_mart_07(con: duckdb.DuckDBPyConnection) -> None:
+    """Impede dupla contagem se a chave municipal repetir em dezembro."""
+    duplicidades = con.execute(
+        """
+        SELECT
+            YEAR(DatReferenciaInformada) AS ano_referencia,
+            NumCNPJ,
+            CodMunicipioIBGE,
+            DatReferenciaInformada,
+            COUNT(*) AS quantidade
+        FROM refined.indger_comerciais
+        WHERE MONTH(DatReferenciaInformada) = 12
+          AND YEAR(DatReferenciaInformada) BETWEEN 2023 AND 2025
+        GROUP BY NumCNPJ, CodMunicipioIBGE, DatReferenciaInformada
+        HAVING COUNT(*) > 1
+        ORDER BY ano_referencia, NumCNPJ, CodMunicipioIBGE
+        """
+    ).fetchall()
+    if duplicidades:
+        raise ValueError(
+            "MART 07 bloqueado: chave CNPJ + município + dezembro duplicada "
+            f"em {len(duplicidades)} grupo(s); exemplos={duplicidades[:5]}"
+        )
+
+
+def _validar_mart_07(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
+    coorte = con.execute(
+        "SELECT posicao, cnpj FROM marts.cohorte_top10_2025 ORDER BY posicao"
+    ).fetchall()
+    if len(coorte) != 10 or len({cnpj for _, cnpj in coorte}) != 10:
+        raise ValueError("A coorte fixa do MART 07 deve conter dez CNPJs únicos.")
+    cnpjs_coorte = {cnpj for _, cnpj in coorte}
+
+    top10 = con.execute(
+        """
+        SELECT ano_referencia, cnpj
+        FROM marts.ranking_por_uc_top10
+        """
+    ).fetchall()
+    nacionais = con.execute(
+        """
+        SELECT ano_referencia, cnpj
+        FROM marts.ranking_por_uc_nacional
+        """
+    ).fetchall()
+    if not top10 or not nacionais:
+        raise ValueError("As saídas principal e nacional do MART 07 devem ter linhas.")
+
+    duplicados_top10 = con.execute(
+        """
+        SELECT ano_referencia, cnpj, COUNT(*)
+        FROM marts.ranking_por_uc_top10
+        GROUP BY ano_referencia, cnpj
+        HAVING COUNT(*) > 1
+        ORDER BY ano_referencia, cnpj
+        """
+    ).fetchall()
+    duplicados_nacionais = con.execute(
+        """
+        SELECT ano_referencia, cnpj, COUNT(*)
+        FROM marts.ranking_por_uc_nacional
+        GROUP BY ano_referencia, cnpj
+        HAVING COUNT(*) > 1
+        ORDER BY ano_referencia, cnpj
+        """
+    ).fetchall()
+    if duplicados_top10 or duplicados_nacionais:
+        raise ValueError(
+            "MART 07 contém chave CNPJ/ano duplicada; "
+            f"top10={duplicados_top10[:5]}, nacional={duplicados_nacionais[:5]}."
+        )
+
+    divergencias_nacional_origem = con.execute(
+        """
+        WITH agregados AS (
+            SELECT
+                NumCNPJ AS cnpj,
+                YEAR(DatReferenciaInformada)::SMALLINT AS ano_referencia,
+                COUNT(*) AS qtd_municipios_dezembro,
+                COUNT(*) FILTER (
+                    WHERE QtdUCAtiva_status = 'valid' AND QtdUCAtiva IS NOT NULL
+                ) AS qtd_uc_validas,
+                COUNT(*) FILTER (
+                    WHERE QtdUCAtiva_status = 'null'
+                       OR (QtdUCAtiva_status = 'valid' AND QtdUCAtiva IS NULL)
+                ) AS qtd_uc_nulas,
+                COUNT(*) FILTER (
+                    WHERE QtdUCAtiva_status = 'invalid'
+                       OR QtdUCAtiva_status IS NULL
+                       OR QtdUCAtiva_status NOT IN ('valid', 'null', 'invalid')
+                ) AS qtd_uc_invalidas,
+                SUM(QtdUCAtiva) FILTER (
+                    WHERE QtdUCAtiva_status = 'valid' AND QtdUCAtiva IS NOT NULL
+                ) AS soma_uc_validas
+            FROM refined.indger_comerciais
+            WHERE MONTH(DatReferenciaInformada) = 12
+              AND YEAR(DatReferenciaInformada) BETWEEN 2023 AND 2025
+            GROUP BY NumCNPJ, YEAR(DatReferenciaInformada)
+        ), esperado AS (
+            SELECT
+                *,
+                CASE
+                    WHEN qtd_uc_invalidas > 0 THEN 'invalid'
+                    WHEN qtd_uc_nulas > 0 AND qtd_uc_validas > 0 THEN 'partial'
+                    WHEN qtd_uc_nulas > 0 THEN 'null'
+                    WHEN qtd_uc_validas = 0 THEN 'invalid'
+                    WHEN soma_uc_validas = 0 THEN 'zero'
+                    ELSE 'valid'
+                END AS status_cobertura,
+                CASE
+                    WHEN qtd_uc_invalidas = 0 AND qtd_uc_nulas = 0
+                     AND qtd_uc_validas = qtd_municipios_dezembro
+                    THEN soma_uc_validas::BIGINT
+                    ELSE NULL::BIGINT
+                END AS qtd_uc_dezembro
+            FROM agregados
+        )
+        SELECT COUNT(*)
+        FROM esperado AS e
+        FULL OUTER JOIN marts.ranking_por_uc_nacional AS n
+          ON e.ano_referencia = n.ano_referencia
+         AND e.cnpj IS NOT DISTINCT FROM n.cnpj
+        WHERE e.ano_referencia IS NULL OR n.ano_referencia IS NULL
+           OR e.qtd_municipios_dezembro
+                IS DISTINCT FROM n.qtd_municipios_dezembro
+           OR e.qtd_uc_validas IS DISTINCT FROM n.qtd_uc_validas
+           OR e.qtd_uc_nulas IS DISTINCT FROM n.qtd_uc_nulas
+           OR e.qtd_uc_invalidas IS DISTINCT FROM n.qtd_uc_invalidas
+           OR e.qtd_uc_dezembro IS DISTINCT FROM n.qtd_uc_dezembro
+           OR e.status_cobertura IS DISTINCT FROM n.status_cobertura
+        """
+    ).fetchone()[0]
+    if divergencias_nacional_origem:
+        raise ValueError(
+            "A saída nacional do MART 07 não preserva os CNPJs/agregados INDGER; "
+            f"divergências={divergencias_nacional_origem}."
+        )
+
+    chaves_esperadas = {
+        (ano, cnpj) for ano in ANOS_MART_01 for cnpj in cnpjs_coorte
+    }
+    chaves_atuais = set(top10)
+    faltantes = sorted(chaves_esperadas - chaves_atuais)
+    extras = sorted(chaves_atuais - chaves_esperadas)
+    if faltantes or extras:
+        raise ValueError(
+            "Saída principal do MART 07 incompleta: "
+            f"CNPJ/ano faltantes={faltantes}; extras={extras}."
+        )
+
+    tipos = {
+        (tabela, coluna): tipo
+        for tabela, coluna, tipo in con.execute(
+            """
+            SELECT table_name, column_name, data_type
+            FROM information_schema.columns
+            WHERE table_schema = 'marts'
+              AND table_name IN ('ranking_por_uc_top10', 'ranking_por_uc_nacional')
+            """
+        ).fetchall()
+    }
+    for tabela in ("ranking_por_uc_top10", "ranking_por_uc_nacional"):
+        if tipos.get((tabela, "cnpj")) != "VARCHAR":
+            raise ValueError(f"CNPJ deve ser VARCHAR em marts.{tabela}.")
+        for coluna in (
+            "qtd_municipios_dezembro",
+            "qtd_uc_validas",
+            "qtd_uc_nulas",
+            "qtd_uc_invalidas",
+            "qtd_uc_dezembro",
+            "posicao_coorte_2025",
+        ):
+            tipo_esperado = "INTEGER" if coluna == "posicao_coorte_2025" else "BIGINT"
+            if tipos.get((tabela, coluna)) != tipo_esperado:
+                raise ValueError(
+                    f"{coluna} deve ser {tipo_esperado} em marts.{tabela}."
+                )
+    if tipos.get(("ranking_por_uc_top10", "variacao_absoluta_uc")) != "BIGINT":
+        raise ValueError("A variação absoluta de UCs deve ser BIGINT no top10.")
+    if tipos.get(("ranking_por_uc_top10", "variacao_percentual_uc")) != "DECIMAL(18,2)":
+        raise ValueError("A variação percentual de UCs deve ser DECIMAL(18,2).")
+
+    status_posicoes_invalidos = con.execute(
+        """
+        SELECT
+            (SELECT COUNT(*) FROM marts.ranking_por_uc_top10
+             WHERE (status_cobertura IN ('valid', 'zero') AND posicao_anual IS NULL)
+                OR (status_cobertura NOT IN ('valid', 'zero') AND posicao_anual IS NOT NULL))
+          + (SELECT COUNT(*) FROM marts.ranking_por_uc_nacional
+             WHERE (status_cobertura IN ('valid', 'zero') AND cnpj IS NOT NULL
+                    AND posicao_nacional IS NULL)
+                OR (status_cobertura NOT IN ('valid', 'zero')
+                    AND posicao_nacional IS NOT NULL))
+        """
+    ).fetchone()[0]
+    if status_posicoes_invalidos:
+        raise ValueError("MART 07 atribuiu posição incompatível com o status das UCs.")
+
+    posicoes_top10_invalidas = con.execute(
+        """
+        WITH ordenadas AS (
+            SELECT
+                ano_referencia,
+                cnpj,
+                posicao_anual,
+                ROW_NUMBER() OVER (
+                    PARTITION BY ano_referencia
+                    ORDER BY qtd_uc_dezembro DESC, cnpj ASC
+                ) AS posicao_esperada
+            FROM marts.ranking_por_uc_top10
+            WHERE status_cobertura IN ('valid', 'zero')
+        )
+        SELECT COUNT(*) FROM ordenadas
+        WHERE posicao_anual IS DISTINCT FROM posicao_esperada
+        """
+    ).fetchone()[0]
+    posicoes_nacionais_invalidas = con.execute(
+        """
+        WITH ordenadas AS (
+            SELECT
+                ano_referencia,
+                cnpj,
+                posicao_nacional,
+                ROW_NUMBER() OVER (
+                    PARTITION BY ano_referencia
+                    ORDER BY qtd_uc_dezembro DESC, cnpj ASC
+                ) AS posicao_esperada
+            FROM marts.ranking_por_uc_nacional
+            WHERE status_cobertura IN ('valid', 'zero') AND cnpj IS NOT NULL
+        )
+        SELECT COUNT(*) FROM ordenadas
+        WHERE posicao_nacional IS DISTINCT FROM posicao_esperada
+        """
+    ).fetchone()[0]
+    if posicoes_top10_invalidas or posicoes_nacionais_invalidas:
+        raise ValueError(
+            "Posições MART 07 não seguem UCs decrescentes e CNPJ crescente; "
+            f"top10={posicoes_top10_invalidas}, nacional={posicoes_nacionais_invalidas}."
+        )
+
+    divergencias_posicao_fixa = con.execute(
+        """
+        SELECT COUNT(*)
+        FROM marts.ranking_por_uc_top10 AS t
+        LEFT JOIN marts.cohorte_top10_2025 AS c ON t.cnpj = c.cnpj
+        WHERE t.posicao_coorte_2025 IS DISTINCT FROM c.posicao
+        """
+    ).fetchone()[0]
+    if divergencias_posicao_fixa:
+        raise ValueError("A posição fixa top10 diverge da coorte persistida.")
+
+    divergencias_coorte = con.execute(
+        """
+        SELECT COUNT(*)
+        FROM marts.cohorte_top10_2025 AS c
+        LEFT JOIN marts.ranking_por_uc_top10 AS t
+          ON t.cnpj = c.cnpj AND t.ano_referencia = 2025
+        WHERE t.cnpj IS NULL
+           OR t.qtd_uc_dezembro IS DISTINCT FROM c.uc_dez_2025
+        """
+    ).fetchone()[0]
+    if divergencias_coorte:
+        raise ValueError(
+            "As UCs de dezembro de 2025 do MART 07 não reconciliam com a coorte; "
+            f"divergências={divergencias_coorte}."
+        )
+
+    divergencias_top10_origem = con.execute(
+        """
+        SELECT
+            t.ano_referencia,
+            t.cnpj,
+            t.qtd_municipios_dezembro,
+            COALESCE(n.qtd_municipios_dezembro, 0),
+            t.qtd_uc_validas,
+            COALESCE(n.qtd_uc_validas, 0),
+            t.qtd_uc_nulas,
+            COALESCE(n.qtd_uc_nulas, 0),
+            t.qtd_uc_invalidas,
+            COALESCE(n.qtd_uc_invalidas, 0),
+            t.qtd_uc_dezembro,
+            n.qtd_uc_dezembro,
+            t.status_cobertura,
+            COALESCE(n.status_cobertura, 'sem_referencia'),
+            t.rotulo_indger,
+            n.rotulo_indger,
+            t.posicao_coorte_2025,
+            n.posicao_coorte_2025
+        FROM marts.ranking_por_uc_top10 AS t
+        LEFT JOIN marts.ranking_por_uc_nacional AS n
+          ON t.cnpj = n.cnpj AND t.ano_referencia = n.ano_referencia
+        WHERE t.qtd_municipios_dezembro IS DISTINCT FROM
+                  COALESCE(n.qtd_municipios_dezembro, 0)
+           OR t.qtd_uc_validas IS DISTINCT FROM COALESCE(n.qtd_uc_validas, 0)
+           OR t.qtd_uc_nulas IS DISTINCT FROM COALESCE(n.qtd_uc_nulas, 0)
+           OR t.qtd_uc_invalidas IS DISTINCT FROM COALESCE(n.qtd_uc_invalidas, 0)
+           OR t.qtd_uc_dezembro IS DISTINCT FROM n.qtd_uc_dezembro
+           OR t.status_cobertura IS DISTINCT FROM
+                  COALESCE(n.status_cobertura, 'sem_referencia')
+           OR t.rotulo_indger IS DISTINCT FROM n.rotulo_indger
+        """
+    ).fetchall()
+    if divergencias_top10_origem:
+        raise ValueError(
+            "A saída top10 do MART 07 diverge da base INDGER; "
+            f"exemplos={divergencias_top10_origem[:5]}."
+        )
+
+    return {"linhas_top10": len(top10), "linhas_nacionais": len(nacionais)}
+
+
+def executar_mart_07() -> dict[str, int]:
+    """Executa os rankings de UCs com validação prévia das chaves municipais."""
+    return executar_sql_mart(
+        MART_07_SQL,
+        _validar_mart_07,
+        validacao_previa=_validar_chaves_uc_mart_07,
+    )
 
 
 if __name__ == "__main__":

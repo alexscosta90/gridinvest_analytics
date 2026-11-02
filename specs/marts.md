@@ -145,12 +145,13 @@ R$/UC é uma medida de intensidade de investimento em relação à base de UCs. 
 
 ### 07_ranking_por_uc.sql
 
-- **Objetivo:** comparar o porte das distribuidoras pelo total de UCs ativas em dezembro.
-- **Granularidade:** ano de dezembro e CNPJ.
-- **Campos principais:** ano, CNPJ, rótulo INDGER, total de UCs ativas, posição anual, posição fixa de dezembro de 2025, flag top 10.
-- **Filtros:** dezembro de 2023, 2024 e 2025; manter todos os CNPJs nos dados-base do ranking.
-- **Cálculo:** somar QtdUCAtiva dos municípios por CNPJ/ano antes de ranquear. A coorte do dashboard é sempre a posição calculada em dezembro de 2025, mesmo ao consultar 2023 ou 2024.
-- **Validações:** uma linha por CNPJ/ano após agregação; ordenar por UCs decrescentes e CNPJ crescente para desempate; confirmar exatamente 10 membros na coorte e comparar a lista com a relação documentada nesta especificação.
+- **Objetivo:** comparar exclusivamente as dez distribuidoras da coorte fixa do dashboard pelo total de UCs ativas em dezembro, mantendo também uma saída nacional auxiliar para diagnóstico.
+- **Saídas e granularidade:** `marts.ranking_por_uc_top10`, exatamente uma linha por CNPJ da coorte fixa e ano (30 linhas para 2023–2025); `marts.ranking_por_uc_nacional`, uma linha por CNPJ com dados em dezembro e ano. As saídas são tabelas distintas e não devem ser somadas entre si.
+- **Campos principais — top 10:** ano, CNPJ, rótulo INDGER, total de UCs ativas, contagens de municípios/valores válidos/nulos/inválidos, status da cobertura, posição anual dentro da coorte, posição fixa de dezembro de 2025 e variações absoluta e percentual contra o ano anterior.
+- **Campos principais — nacional auxiliar:** ano, CNPJ, rótulo INDGER, total de UCs ativas, status da cobertura, posição no ranking nacional, posição fixa de dezembro de 2025 e flag de pertencimento ao top 10.
+- **Filtros:** dezembro de 2023, 2024 e 2025. A saída principal contém somente os dez CNPJs persistidos em `marts.cohorte_top10_2025`; a saída auxiliar preserva todos os CNPJs com referência INDGER disponível.
+- **Cálculo:** validar antes da agregação a unicidade da chave CNPJ + município + referência. Somar as UCs municipais por CNPJ/ano. Gerar a saída principal a partir da coorte fixa cruzada com os três anos e associar os valores observados; referência ausente permanece indisponível. Calcular posições por UCs decrescentes e CNPJ crescente, separadamente na coorte e no universo nacional. Calcular variações anuais somente entre anos consecutivos e bases válidas; percentual sobre base zero fica indisponível. Ausência de referência, valores nulos ou inválidos nunca se convertem em zero.
+- **Validações:** exatamente dez CNPJs distintos por ano na saída principal, iguais à coorte persistida; uma linha por CNPJ/ano em cada saída; duplicidades municipais bloqueiam a execução; posições válidas determinísticas, sem confundir ranking da coorte com ranking nacional; soma de dezembro de 2025 por CNPJ reconcilia com `marts.cohorte_top10_2025`; saída nacional reconcilia com os agregados INDGER; variações respeitam status e continuidade temporal.
 
 ### 08_perfil_investimentos.sql
 
