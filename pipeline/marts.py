@@ -10,6 +10,7 @@ from pipeline.db import BASE_DIR, conectar
 COORTE_TOP10_SQL = BASE_DIR / "sql" / "marts" / "00_cohorte_top10_2025.sql"
 MART_01_SQL = BASE_DIR / "sql" / "marts" / "01_investimentos_anuais.sql"
 MART_02_SQL = BASE_DIR / "sql" / "marts" / "02_investimentos_por_tipo.sql"
+MART_03_SQL = BASE_DIR / "sql" / "marts" / "03_investimento_por_uc.sql"
 ANOS_MART_01 = {2023, 2024, 2025}
 ESCOPOS_MART_01 = {"nacional", "top10"}
 
@@ -81,6 +82,8 @@ def _garantir_coorte_top10(con: duckdb.DuckDBPyConnection) -> None:
 def executar_sql_mart(
     caminho_sql: Path,
     validacao: Callable[[duckdb.DuckDBPyConnection], dict[str, int]] | None = None,
+    *,
+    validacao_previa: Callable[[duckdb.DuckDBPyConnection], None] | None = None,
 ) -> dict[str, int]:
     """Executa um MART e sua validação dentro da mesma transação."""
     if not caminho_sql.is_file():
@@ -93,6 +96,8 @@ def executar_sql_mart(
 
         try:
             con.execute("CREATE SCHEMA IF NOT EXISTS marts")
+            if validacao_previa is not None:
+                validacao_previa(con)
             _garantir_coorte_top10(con)
             con.execute(consulta)
 
@@ -213,6 +218,176 @@ def _validar_mart_02(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
 def executar_mart_02() -> dict[str, int]:
     """Executa o MART 02 na transação e coorte compartilhadas."""
     return executar_sql_mart(MART_02_SQL, _validar_mart_02)
+
+
+def _validar_chaves_uc_mart_03(con: duckdb.DuckDBPyConnection) -> None:
+    """Bloqueia soma municipal se a chave INDGER repetir em dezembro."""
+    duplicidades = con.execute(
+        """
+        SELECT
+            YEAR(DatReferenciaInformada) AS ano_referencia,
+            NumCNPJ,
+            CodMunicipioIBGE,
+            DatReferenciaInformada,
+            COUNT(*) AS quantidade
+        FROM refined.indger_comerciais
+        WHERE MONTH(DatReferenciaInformada) = 12
+          AND YEAR(DatReferenciaInformada) BETWEEN 2023 AND 2025
+        GROUP BY NumCNPJ, CodMunicipioIBGE, DatReferenciaInformada
+        HAVING COUNT(*) > 1
+        ORDER BY ano_referencia, NumCNPJ, CodMunicipioIBGE
+        """
+    ).fetchall()
+    if duplicidades:
+        raise ValueError(
+            "Agregação de UCs bloqueada: chave CNPJ + município + dezembro "
+            f"duplicada em {len(duplicidades)} grupo(s); exemplos="
+            f"{duplicidades[:5]}"
+        )
+
+
+def _validar_mart_03(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
+    chaves = con.execute(
+        "SELECT ano_referencia, escopo, cnpj "
+        "FROM marts.investimento_por_uc"
+    ).fetchall()
+    if not chaves:
+        raise ValueError("O MART 03 não produziu linhas.")
+
+    duplicadas = con.execute(
+        """
+        SELECT COUNT(*)
+        FROM (
+            SELECT ano_referencia, escopo, cnpj
+            FROM marts.investimento_por_uc
+            GROUP BY ano_referencia, escopo, cnpj
+            HAVING COUNT(*) > 1
+        ) AS chaves_duplicadas
+        """
+    ).fetchone()[0]
+    if duplicadas:
+        raise ValueError("O MART 03 contém chaves CNPJ/ano/escopo duplicadas.")
+
+    anos = {linha[0] for linha in chaves}
+    escopos = {linha[1] for linha in chaves}
+    if anos != ANOS_MART_01 or escopos != ESCOPOS_MART_01:
+        raise ValueError(
+            "O MART 03 deve cobrir 2023–2025 nos escopos nacional/top10; "
+            f"anos={sorted(anos)}, escopos={sorted(escopos)}."
+        )
+
+    tipos = dict(
+        con.execute(
+            """
+            SELECT column_name, data_type
+            FROM information_schema.columns
+            WHERE table_schema = 'marts' AND table_name = 'investimento_por_uc'
+            """
+        ).fetchall()
+    )
+    if tipos.get("cnpj") != "VARCHAR":
+        raise ValueError("O CNPJ do MART 03 deve permanecer como VARCHAR.")
+    for coluna in ("total_planejado", "total_realizado"):
+        if not tipos.get(coluna, "").startswith("DECIMAL"):
+            raise ValueError(f"{coluna} deve manter tipo DECIMAL no MART 03.")
+    for coluna in (
+        "investimento_planejado_por_uc",
+        "investimento_realizado_por_uc",
+    ):
+        if tipos.get(coluna) != "DECIMAL(18,2)":
+            raise ValueError(f"{coluna} deve ser DECIMAL(18,2).")
+
+    divergencias = con.execute(
+        """
+        WITH pdd_cnpj_ano AS (
+            SELECT
+                NumCPFCNPJ AS cnpj,
+                AnoReferencia AS ano_referencia,
+                COUNT(*) AS qtd_registros_pdd,
+                SUM(VlrTotalPlanejado)
+                    FILTER (WHERE VlrTotalPlanejado_status = 'valid')
+                    AS total_planejado,
+                COUNT(*) FILTER (WHERE VlrTotalPlanejado_status = 'valid')
+                    AS qtd_planejados_validos,
+                COUNT(*) FILTER (WHERE VlrTotalPlanejado_status = 'null')
+                    AS qtd_planejados_nulos,
+                COUNT(*) FILTER (WHERE VlrTotalPlanejado_status = 'invalid')
+                    AS qtd_planejados_invalidos,
+                SUM(VlrTotalRealizado)
+                    FILTER (WHERE VlrTotalRealizado_status = 'valid')
+                    AS total_realizado,
+                COUNT(*) FILTER (WHERE VlrTotalRealizado_status = 'valid')
+                    AS qtd_realizados_validos,
+                COUNT(*) FILTER (WHERE VlrTotalRealizado_status = 'null')
+                    AS qtd_realizados_nulos,
+                COUNT(*) FILTER (WHERE VlrTotalRealizado_status = 'invalid')
+                    AS qtd_realizados_invalidos
+            FROM refined.pdd
+            WHERE AnoReferencia BETWEEN 2023 AND 2025
+            GROUP BY NumCPFCNPJ, AnoReferencia
+        ),
+        esperado AS (
+            SELECT *, 'nacional' AS escopo FROM pdd_cnpj_ano
+            UNION ALL
+            SELECT p.*, 'top10' AS escopo
+            FROM pdd_cnpj_ano AS p
+            INNER JOIN marts.cohorte_top10_2025 AS t ON p.cnpj = t.cnpj
+        )
+        SELECT COUNT(*)
+        FROM esperado AS e
+        FULL OUTER JOIN marts.investimento_por_uc AS m
+          ON e.cnpj IS NOT DISTINCT FROM m.cnpj
+         AND e.ano_referencia = m.ano_referencia
+         AND e.escopo = m.escopo
+        WHERE e.ano_referencia IS NULL OR m.ano_referencia IS NULL
+           OR e.qtd_registros_pdd IS DISTINCT FROM m.qtd_registros_pdd
+           OR e.total_planejado IS DISTINCT FROM m.total_planejado
+           OR e.qtd_planejados_validos
+                IS DISTINCT FROM m.qtd_planejados_validos
+           OR e.qtd_planejados_nulos IS DISTINCT FROM m.qtd_planejados_nulos
+           OR e.qtd_planejados_invalidos
+                IS DISTINCT FROM m.qtd_planejados_invalidos
+           OR e.total_realizado IS DISTINCT FROM m.total_realizado
+           OR e.qtd_realizados_validos
+                IS DISTINCT FROM m.qtd_realizados_validos
+           OR e.qtd_realizados_nulos IS DISTINCT FROM m.qtd_realizados_nulos
+           OR e.qtd_realizados_invalidos
+                IS DISTINCT FROM m.qtd_realizados_invalidos
+        """
+    ).fetchone()[0]
+    if divergencias:
+        raise ValueError(
+            "Os investimentos do MART 03 não reconciliam linha a linha com "
+            f"refined.pdd ({divergencias} divergências); possível multiplicação "
+            "ou perda durante o JOIN."
+        )
+
+    indisponiveis = con.execute(
+        """
+        SELECT
+            COUNT(*) FILTER (
+                WHERE investimento_planejado_por_uc IS NULL
+            ),
+            COUNT(*) FILTER (
+                WHERE investimento_realizado_por_uc IS NULL
+            )
+        FROM marts.investimento_por_uc
+        """
+    ).fetchone()
+    return {
+        "linhas": len(chaves),
+        "planejado_por_uc_indisponivel": indisponiveis[0],
+        "realizado_por_uc_indisponivel": indisponiveis[1],
+    }
+
+
+def executar_mart_03() -> dict[str, int]:
+    """Executa R$/UC após validar as chaves municipais de dezembro."""
+    return executar_sql_mart(
+        MART_03_SQL,
+        _validar_mart_03,
+        validacao_previa=_validar_chaves_uc_mart_03,
+    )
 
 
 if __name__ == "__main__":
