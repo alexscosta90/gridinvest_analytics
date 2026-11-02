@@ -13,6 +13,7 @@ MART_02_SQL = BASE_DIR / "sql" / "marts" / "02_investimentos_por_tipo.sql"
 MART_03_SQL = BASE_DIR / "sql" / "marts" / "03_investimento_por_uc.sql"
 MART_04_SQL = BASE_DIR / "sql" / "marts" / "04_planejado_vs_realizado.sql"
 MART_05_SQL = BASE_DIR / "sql" / "marts" / "05_evolucao_investimentos.sql"
+MART_06_SQL = BASE_DIR / "sql" / "marts" / "06_ranking_investimentos.sql"
 ANOS_MART_01 = {2023, 2024, 2025}
 ESCOPOS_MART_01 = {"nacional", "top10"}
 
@@ -721,6 +722,311 @@ def _validar_mart_05(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
 def executar_mart_05() -> dict[str, int]:
     """Executa as séries de evolução no executor transacional compartilhado."""
     return executar_sql_mart(MART_05_SQL, _validar_mart_05)
+
+
+def _validar_mart_06(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
+    tabela = "ranking_investimentos"
+    chaves = con.execute(
+        f"SELECT ano_referencia, cnpj, escopo, medida FROM marts.{tabela}"
+    ).fetchall()
+    if not chaves:
+        raise ValueError("O MART 06 não produziu linhas.")
+
+    coorte = {
+        linha[0]
+        for linha in con.execute(
+            "SELECT cnpj FROM marts.cohorte_top10_2025"
+        ).fetchall()
+    }
+    linhas_top10 = con.execute(
+        """
+        SELECT ano_referencia, medida, cnpj
+        FROM marts.ranking_investimentos
+        WHERE escopo = 'top10'
+        """
+    ).fetchall()
+    duplicadas_top10 = con.execute(
+        """
+        SELECT ano_referencia, medida, cnpj, COUNT(*) AS quantidade
+        FROM marts.ranking_investimentos
+        WHERE escopo = 'top10'
+        GROUP BY ano_referencia, medida, cnpj
+        HAVING COUNT(*) > 1
+        ORDER BY ano_referencia, medida, cnpj
+        """
+    ).fetchall()
+    if duplicadas_top10:
+        raise ValueError(
+            "O ranking top10 contém CNPJ/ano/medida duplicado: "
+            f"{duplicadas_top10}."
+        )
+
+    chaves_esperadas_top10 = {
+        (ano, medida, cnpj)
+        for ano in ANOS_MART_01
+        for medida in ("planejado", "realizado")
+        for cnpj in coorte
+    }
+    chaves_atuais_top10 = set(linhas_top10)
+    faltantes_top10 = sorted(chaves_esperadas_top10 - chaves_atuais_top10)
+    extras_top10 = sorted(chaves_atuais_top10 - chaves_esperadas_top10)
+    if faltantes_top10 or extras_top10:
+        raise ValueError(
+            "A coorte do ranking top10 está incompleta: "
+            f"CNPJ/ano/medida faltantes={faltantes_top10}; "
+            f"extras={extras_top10}."
+        )
+
+    if len(set(chaves)) != len(chaves):
+        raise ValueError("O MART 06 contém CNPJ/ano/escopo/medida duplicado.")
+    if {linha[0] for linha in chaves} != ANOS_MART_01:
+        raise ValueError("O MART 06 deve cobrir 2023–2025.")
+    if {linha[2] for linha in chaves} != ESCOPOS_MART_01:
+        raise ValueError("O MART 06 deve separar os escopos nacional e top10.")
+    if {linha[3] for linha in chaves} != {"planejado", "realizado"}:
+        raise ValueError("O MART 06 deve separar rankings planejado e realizado.")
+
+    tipos = dict(
+        con.execute(
+            """
+            SELECT column_name, data_type
+            FROM information_schema.columns
+            WHERE table_schema = 'marts' AND table_name = 'ranking_investimentos'
+            """
+        ).fetchall()
+    )
+    if tipos.get("cnpj") != "VARCHAR":
+        raise ValueError("O CNPJ do MART 06 deve permanecer como VARCHAR.")
+    if not tipos.get("valor_investimento", "").startswith("DECIMAL"):
+        raise ValueError("O valor do MART 06 deve manter tipo DECIMAL.")
+
+    invalidas = con.execute(
+        """
+        SELECT COUNT(*)
+        FROM marts.ranking_investimentos
+        WHERE (status_valor = 'valid' AND posicao IS NULL)
+           OR (status_valor <> 'valid' AND posicao IS NOT NULL)
+        """
+    ).fetchone()[0]
+    if invalidas:
+        raise ValueError(
+            "O MART 06 atribuiu posição incompatível com o status financeiro."
+        )
+
+    posicoes_invalidas = con.execute(
+        """
+        WITH posicoes AS (
+            SELECT
+                ano_referencia,
+                escopo,
+                medida,
+                posicao,
+                ROW_NUMBER() OVER (
+                    PARTITION BY ano_referencia, escopo, medida
+                    ORDER BY valor_investimento DESC, cnpj ASC
+                ) AS posicao_esperada
+            FROM marts.ranking_investimentos
+            WHERE status_valor = 'valid'
+        )
+        SELECT COUNT(*) FROM posicoes
+        WHERE posicao <> posicao_esperada
+        """
+    ).fetchone()[0]
+    if posicoes_invalidas:
+        raise ValueError("As posições do MART 06 não seguem valor desc/CNPJ asc.")
+
+    membros_top10_invalidos = con.execute(
+        """
+        SELECT COUNT(*)
+        FROM marts.ranking_investimentos AS r
+        WHERE (r.escopo = 'top10' AND NOT EXISTS (
+                  SELECT 1 FROM marts.cohorte_top10_2025 AS c
+                  WHERE c.cnpj = r.cnpj
+              ))
+           OR r.top10_2025 IS DISTINCT FROM EXISTS (
+                  SELECT 1 FROM marts.cohorte_top10_2025 AS c
+                  WHERE c.cnpj = r.cnpj
+              )
+        """
+    ).fetchone()[0]
+    if membros_top10_invalidos:
+        raise ValueError("O escopo top10 ou sua flag diverge da coorte fixa.")
+
+    divergencias_pdd = con.execute(
+        """
+        WITH esperado AS (
+            SELECT
+                NumCPFCNPJ AS cnpj,
+                AnoReferencia AS ano_referencia,
+                COUNT(*) AS qtd_registros_pdd,
+                SUM(VlrTotalPlanejado)
+                    FILTER (WHERE VlrTotalPlanejado_status = 'valid')
+                    AS total_planejado,
+                COUNT(*) FILTER (WHERE VlrTotalPlanejado_status = 'valid')
+                    AS qtd_validos_planejado,
+                COUNT(*) FILTER (WHERE VlrTotalPlanejado_status = 'null')
+                    AS qtd_nulos_planejado,
+                COUNT(*) FILTER (WHERE VlrTotalPlanejado_status = 'invalid')
+                    AS qtd_invalidos_planejado,
+                SUM(VlrTotalRealizado)
+                    FILTER (WHERE VlrTotalRealizado_status = 'valid')
+                    AS total_realizado,
+                COUNT(*) FILTER (WHERE VlrTotalRealizado_status = 'valid')
+                    AS qtd_validos_realizado,
+                COUNT(*) FILTER (WHERE VlrTotalRealizado_status = 'null')
+                    AS qtd_nulos_realizado,
+                COUNT(*) FILTER (WHERE VlrTotalRealizado_status = 'invalid')
+                    AS qtd_invalidos_realizado
+            FROM refined.pdd
+            WHERE AnoReferencia BETWEEN 2023 AND 2025
+            GROUP BY NumCPFCNPJ, AnoReferencia
+        ), medidas AS (
+            SELECT
+                *,
+                'planejado' AS medida,
+                total_planejado AS valor_investimento,
+                qtd_validos_planejado AS qtd_validos,
+                qtd_nulos_planejado AS qtd_nulos,
+                qtd_invalidos_planejado AS qtd_invalidos
+            FROM esperado
+            UNION ALL
+            SELECT
+                *,
+                'realizado',
+                total_realizado,
+                qtd_validos_realizado,
+                qtd_nulos_realizado,
+                qtd_invalidos_realizado
+            FROM esperado
+        ), esperados_escopo AS (
+            SELECT m.*, 'nacional' AS escopo
+            FROM medidas AS m
+            UNION ALL
+            SELECT m.*, 'top10'
+            FROM medidas AS m
+            INNER JOIN marts.cohorte_top10_2025 AS c ON m.cnpj = c.cnpj
+        ), comparacao AS (
+            SELECT
+                e.ano_referencia AS ano_esperado,
+                r.ano_referencia AS ano_atual,
+                e.cnpj AS cnpj_esperado,
+                r.cnpj AS cnpj_atual,
+                e.escopo AS escopo_esperado,
+                r.escopo AS escopo_atual,
+                e.medida AS medida_esperada,
+                r.medida AS medida_atual,
+                e.qtd_registros_pdd AS qtd_esperada,
+                r.qtd_registros_pdd AS qtd_atual,
+                e.valor_investimento AS valor_esperado,
+                r.valor_investimento AS valor_atual,
+                e.qtd_validos AS validos_esperados,
+                r.qtd_valores_validos AS validos_atuais,
+                e.qtd_nulos AS nulos_esperados,
+                r.qtd_valores_nulos AS nulos_atuais,
+                e.qtd_invalidos AS invalidos_esperados,
+                r.qtd_valores_invalidos AS invalidos_atuais,
+                CASE
+                    WHEN e.qtd_invalidos > 0 THEN 'invalid'
+                    WHEN e.qtd_validos = 0 AND e.qtd_nulos > 0 THEN 'null'
+                    WHEN e.qtd_nulos > 0 THEN 'partial'
+                    ELSE 'valid'
+                END AS status_esperado,
+                r.status_valor AS status_atual
+            FROM esperados_escopo AS e
+            FULL OUTER JOIN marts.ranking_investimentos AS r
+              ON e.ano_referencia = r.ano_referencia
+             AND e.cnpj IS NOT DISTINCT FROM r.cnpj
+             AND e.escopo = r.escopo
+             AND e.medida = r.medida
+        )
+        SELECT COUNT(*) FROM comparacao
+        WHERE ano_esperado IS NULL OR ano_atual IS NULL
+           OR qtd_esperada IS DISTINCT FROM qtd_atual
+           OR valor_esperado IS DISTINCT FROM valor_atual
+           OR validos_esperados IS DISTINCT FROM validos_atuais
+           OR nulos_esperados IS DISTINCT FROM nulos_atuais
+           OR invalidos_esperados IS DISTINCT FROM invalidos_atuais
+           OR status_esperado IS DISTINCT FROM status_atual
+        """
+    ).fetchone()[0]
+    if divergencias_pdd:
+        raise ValueError(
+            "Os valores e status do MART 06 não reconciliam com refined.pdd; "
+            f"divergências={divergencias_pdd}."
+        )
+
+    divergencias_mart01 = con.execute(
+        """
+        WITH agregados AS (
+            SELECT
+                ano_referencia,
+                escopo,
+                medida,
+                SUM(valor_investimento) AS total,
+                SUM(qtd_registros_pdd) AS qtd_registros_pdd,
+                SUM(qtd_valores_validos) AS qtd_validos,
+                SUM(qtd_valores_nulos) AS qtd_nulos,
+                SUM(qtd_valores_invalidos) AS qtd_invalidos,
+                CASE
+                    WHEN SUM(qtd_valores_invalidos) > 0 THEN 'invalid'
+                    WHEN SUM(qtd_valores_validos) = 0
+                     AND SUM(qtd_valores_nulos) > 0 THEN 'null'
+                    WHEN SUM(qtd_valores_nulos) > 0 THEN 'partial'
+                    ELSE 'valid'
+                END AS status_total
+            FROM marts.ranking_investimentos
+            GROUP BY ano_referencia, escopo, medida
+        ), esperados AS (
+            SELECT
+                ano_referencia,
+                escopo,
+                'planejado' AS medida,
+                total_planejado AS total,
+                qtd_registros_pdd,
+                qtd_planejados_validos AS qtd_validos,
+                qtd_planejados_nulos AS qtd_nulos,
+                qtd_planejados_invalidos AS qtd_invalidos,
+                status_total_planejado AS status_total
+            FROM marts.investimentos_anuais
+            UNION ALL
+            SELECT
+                ano_referencia,
+                escopo,
+                'realizado',
+                total_realizado,
+                qtd_registros_pdd,
+                qtd_realizados_validos,
+                qtd_realizados_nulos,
+                qtd_realizados_invalidos,
+                status_total_realizado
+            FROM marts.investimentos_anuais
+        )
+        SELECT COUNT(*) FROM agregados AS a
+        FULL OUTER JOIN esperados AS e
+          ON a.ano_referencia = e.ano_referencia
+         AND a.escopo = e.escopo
+         AND a.medida = e.medida
+        WHERE a.ano_referencia IS NULL OR e.ano_referencia IS NULL
+           OR a.total IS DISTINCT FROM e.total
+           OR a.qtd_registros_pdd IS DISTINCT FROM e.qtd_registros_pdd
+           OR a.qtd_validos IS DISTINCT FROM e.qtd_validos
+           OR a.qtd_nulos IS DISTINCT FROM e.qtd_nulos
+           OR a.qtd_invalidos IS DISTINCT FROM e.qtd_invalidos
+           OR a.status_total IS DISTINCT FROM e.status_total
+        """
+    ).fetchone()[0]
+    if divergencias_mart01:
+        raise ValueError(
+            "Os totais do MART 06 não reconciliam com o MART 01; "
+            f"divergências={divergencias_mart01}."
+        )
+
+    return {"linhas": len(chaves)}
+
+
+def executar_mart_06() -> dict[str, int]:
+    """Executa os rankings financeiros no executor transacional comum."""
+    return executar_sql_mart(MART_06_SQL, _validar_mart_06)
 
 
 if __name__ == "__main__":
