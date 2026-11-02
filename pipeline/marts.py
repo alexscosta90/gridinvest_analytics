@@ -11,6 +11,7 @@ COORTE_TOP10_SQL = BASE_DIR / "sql" / "marts" / "00_cohorte_top10_2025.sql"
 MART_01_SQL = BASE_DIR / "sql" / "marts" / "01_investimentos_anuais.sql"
 MART_02_SQL = BASE_DIR / "sql" / "marts" / "02_investimentos_por_tipo.sql"
 MART_03_SQL = BASE_DIR / "sql" / "marts" / "03_investimento_por_uc.sql"
+MART_04_SQL = BASE_DIR / "sql" / "marts" / "04_planejado_vs_realizado.sql"
 ANOS_MART_01 = {2023, 2024, 2025}
 ESCOPOS_MART_01 = {"nacional", "top10"}
 
@@ -388,6 +389,162 @@ def executar_mart_03() -> dict[str, int]:
         _validar_mart_03,
         validacao_previa=_validar_chaves_uc_mart_03,
     )
+
+
+def _validar_mart_04(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
+    linhas_distribuidora = con.execute(
+        "SELECT cnpj, ano_referencia FROM marts.planejado_vs_realizado_distribuidora"
+    ).fetchall()
+    linhas_nacionais = con.execute(
+        "SELECT ano_referencia FROM marts.planejado_vs_realizado_nacional"
+    ).fetchall()
+    if not linhas_distribuidora:
+        raise ValueError("A saída por distribuidora do MART 04 não produziu linhas.")
+
+    chaves_distintas = set(linhas_distribuidora)
+    anos_nacionais = [linha[0] for linha in linhas_nacionais]
+    if len(chaves_distintas) != len(linhas_distribuidora):
+        raise ValueError("MART 04 contém CNPJ/ano duplicado na saída por distribuidora.")
+    if set(anos_nacionais) != ANOS_MART_01 or len(anos_nacionais) != 3:
+        raise ValueError("A saída nacional do MART 04 deve ter uma linha por ano 2023–2025.")
+    if {ano for _, ano in linhas_distribuidora} != ANOS_MART_01:
+        raise ValueError("A saída por distribuidora do MART 04 deve cobrir 2023–2025.")
+
+    tipos = dict(
+        con.execute(
+            """
+            SELECT column_name, data_type
+            FROM information_schema.columns
+            WHERE table_schema = 'marts'
+              AND table_name = 'planejado_vs_realizado_distribuidora'
+            """
+        ).fetchall()
+    )
+    if tipos.get("cnpj") != "VARCHAR":
+        raise ValueError("O CNPJ do MART 04 deve permanecer como VARCHAR.")
+    for coluna in (
+        "total_planejado",
+        "total_realizado",
+        "diferenca_absoluta",
+    ):
+        if not tipos.get(coluna, "").startswith("DECIMAL"):
+            raise ValueError(f"{coluna} deve manter tipo DECIMAL no MART 04.")
+    for coluna in ("percentual_execucao", "diferenca_percentual"):
+        if tipos.get(coluna) != "DECIMAL(18,2)":
+            raise ValueError(f"{coluna} deve ser DECIMAL(18,2) no MART 04.")
+
+    divergencias_coorte = con.execute(
+        """
+        SELECT COUNT(*)
+        FROM marts.planejado_vs_realizado_distribuidora AS d
+        WHERE d.top10_2025 IS DISTINCT FROM EXISTS (
+            SELECT 1 FROM marts.cohorte_top10_2025 AS t WHERE t.cnpj = d.cnpj
+        )
+        """
+    ).fetchone()[0]
+    if divergencias_coorte:
+        raise ValueError("A flag top10_2025 diverge da coorte persistida.")
+
+    divergencias_pdd = con.execute(
+        """
+        WITH esperado AS (
+            SELECT
+                NumCPFCNPJ AS cnpj,
+                AnoReferencia AS ano_referencia,
+                COUNT(*) AS qtd_registros_pdd,
+                SUM(VlrTotalPlanejado)
+                    FILTER (WHERE VlrTotalPlanejado_status = 'valid')
+                    AS total_planejado,
+                COUNT(*) FILTER (WHERE VlrTotalPlanejado_status = 'valid')
+                    AS qtd_planejados_validos,
+                COUNT(*) FILTER (WHERE VlrTotalPlanejado_status = 'null')
+                    AS qtd_planejados_nulos,
+                COUNT(*) FILTER (WHERE VlrTotalPlanejado_status = 'invalid')
+                    AS qtd_planejados_invalidos,
+                SUM(VlrTotalRealizado)
+                    FILTER (WHERE VlrTotalRealizado_status = 'valid')
+                    AS total_realizado,
+                COUNT(*) FILTER (WHERE VlrTotalRealizado_status = 'valid')
+                    AS qtd_realizados_validos,
+                COUNT(*) FILTER (WHERE VlrTotalRealizado_status = 'null')
+                    AS qtd_realizados_nulos,
+                COUNT(*) FILTER (WHERE VlrTotalRealizado_status = 'invalid')
+                    AS qtd_realizados_invalidos
+            FROM refined.pdd
+            WHERE AnoReferencia BETWEEN 2023 AND 2025
+            GROUP BY NumCPFCNPJ, AnoReferencia
+        )
+        SELECT COUNT(*)
+        FROM esperado AS e
+        FULL OUTER JOIN marts.planejado_vs_realizado_distribuidora AS d
+          ON e.cnpj IS NOT DISTINCT FROM d.cnpj
+         AND e.ano_referencia = d.ano_referencia
+        WHERE e.ano_referencia IS NULL OR d.ano_referencia IS NULL
+           OR e.qtd_registros_pdd IS DISTINCT FROM d.qtd_registros_pdd
+           OR e.total_planejado IS DISTINCT FROM d.total_planejado
+           OR e.qtd_planejados_validos
+                IS DISTINCT FROM d.qtd_planejados_validos
+           OR e.qtd_planejados_nulos IS DISTINCT FROM d.qtd_planejados_nulos
+           OR e.qtd_planejados_invalidos
+                IS DISTINCT FROM d.qtd_planejados_invalidos
+           OR e.total_realizado IS DISTINCT FROM d.total_realizado
+           OR e.qtd_realizados_validos
+                IS DISTINCT FROM d.qtd_realizados_validos
+           OR e.qtd_realizados_nulos IS DISTINCT FROM d.qtd_realizados_nulos
+           OR e.qtd_realizados_invalidos
+                IS DISTINCT FROM d.qtd_realizados_invalidos
+        """
+    ).fetchone()[0]
+    if divergencias_pdd:
+        raise ValueError(
+            "A saída por distribuidora do MART 04 não reconcilia com refined.pdd; "
+            f"divergências={divergencias_pdd}."
+        )
+
+    divergencias_nacionais = con.execute(
+        """
+        SELECT COUNT(*)
+        FROM marts.planejado_vs_realizado_nacional AS n
+        FULL OUTER JOIN (
+            SELECT * FROM marts.investimentos_anuais WHERE escopo = 'nacional'
+        ) AS a
+            ON n.ano_referencia = a.ano_referencia
+        WHERE n.ano_referencia IS NULL OR a.ano_referencia IS NULL
+           OR n.qtd_registros_pdd IS DISTINCT FROM a.qtd_registros_pdd
+           OR n.qtd_cnpjs IS DISTINCT FROM a.qtd_cnpjs
+           OR n.total_planejado IS DISTINCT FROM a.total_planejado
+           OR n.qtd_planejados_validos
+                IS DISTINCT FROM a.qtd_planejados_validos
+           OR n.qtd_planejados_nulos IS DISTINCT FROM a.qtd_planejados_nulos
+           OR n.qtd_planejados_invalidos
+                IS DISTINCT FROM a.qtd_planejados_invalidos
+           OR n.status_total_planejado
+                IS DISTINCT FROM a.status_total_planejado
+           OR n.total_realizado IS DISTINCT FROM a.total_realizado
+           OR n.qtd_realizados_validos
+                IS DISTINCT FROM a.qtd_realizados_validos
+           OR n.qtd_realizados_nulos IS DISTINCT FROM a.qtd_realizados_nulos
+           OR n.qtd_realizados_invalidos
+                IS DISTINCT FROM a.qtd_realizados_invalidos
+           OR n.status_total_realizado
+                IS DISTINCT FROM a.status_total_realizado
+        """
+    ).fetchone()[0]
+    if divergencias_nacionais:
+        raise ValueError(
+            "A saída nacional do MART 04 não reconcilia com o MART 01; "
+            f"divergências={divergencias_nacionais}."
+        )
+
+    return {
+        "linhas_distribuidoras": len(linhas_distribuidora),
+        "linhas_nacionais": len(linhas_nacionais),
+    }
+
+
+def executar_mart_04() -> dict[str, int]:
+    """Executa as saídas separadas do MART 04 na transação compartilhada."""
+    return executar_sql_mart(MART_04_SQL, _validar_mart_04)
 
 
 if __name__ == "__main__":
