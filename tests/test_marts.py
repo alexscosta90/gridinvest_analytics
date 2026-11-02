@@ -37,6 +37,7 @@ def preparar_banco(caminho, linhas_pdd, linhas_indger=None):
         CREATE TABLE refined.pdd (
             NumCPFCNPJ VARCHAR,
             AnoReferencia SMALLINT,
+            DscTipoObra VARCHAR,
             VlrTotalPlanejado DECIMAL(18, 2),
             VlrTotalPlanejado_status VARCHAR,
             VlrTotalRealizado DECIMAL(18, 2),
@@ -45,7 +46,7 @@ def preparar_banco(caminho, linhas_pdd, linhas_indger=None):
         """
     )
     con.executemany(
-        "INSERT INTO refined.pdd VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO refined.pdd VALUES (?, ?, ?, ?, ?, ?, ?)",
         linhas_pdd,
     )
     con.execute(
@@ -75,15 +76,28 @@ def conectar_teste(caminho, monkeypatch):
 
 def linhas_completas():
     return [
-        (TOP10_CNPJ, 2023, Decimal("100.00"), "valid", Decimal("80.00"), "valid"),
-        (TOP10_CNPJ, 2023, Decimal("20.00"), "valid", Decimal("10.00"), "valid"),
-        (TOP10_CNPJ, 2023, Decimal("0.00"), "valid", Decimal("0.00"), "valid"),
-        (OUTRO_CNPJ, 2023, Decimal("7.00"), "valid", Decimal("5.00"), "valid"),
-        (OUTRO_CNPJ, 2023, None, "invalid", None, "null"),
-        (TOP10_CNPJ, 2024, Decimal("40.00"), "valid", Decimal("30.00"), "valid"),
-        (OUTRO_CNPJ, 2024, Decimal("10.00"), "valid", Decimal("8.00"), "valid"),
-        (TOP10_CNPJ, 2025, Decimal("60.00"), "valid", Decimal("50.00"), "valid"),
-        (OUTRO_CNPJ, 2025, Decimal("9.00"), "valid", Decimal("8.00"), "valid"),
+        (TOP10_CNPJ, 2023, "Expansão", Decimal("100.00"), "valid", Decimal("80.00"), "valid"),
+        (TOP10_CNPJ, 2023, "Melhoria", Decimal("20.00"), "valid", Decimal("10.00"), "valid"),
+        (TOP10_CNPJ, 2023, "Expansão", Decimal("0.00"), "valid", Decimal("0.00"), "valid"),
+        (OUTRO_CNPJ, 2023, "Melhoria", Decimal("7.00"), "valid", Decimal("5.00"), "valid"),
+        (OUTRO_CNPJ, 2023, None, None, "invalid", None, "null"),
+        (TOP10_CNPJ, 2024, "Expansão", Decimal("40.00"), "valid", Decimal("30.00"), "valid"),
+        (OUTRO_CNPJ, 2024, "Melhoria", Decimal("10.00"), "valid", Decimal("8.00"), "valid"),
+        (TOP10_CNPJ, 2025, "Expansão", Decimal("60.00"), "valid", Decimal("50.00"), "valid"),
+        (OUTRO_CNPJ, 2025, "Melhoria", Decimal("9.00"), "valid", Decimal("8.00"), "valid"),
+    ]
+
+
+def linhas_mart02():
+    return [
+        (TOP10_CNPJ, 2023, "Expansão", Decimal("0.00"), "valid", Decimal("0.00"), "valid"),
+        (TOP10_CNPJ, 2023, "Melhoria", Decimal("10.00"), "valid", None, "null"),
+        (OUTRO_CNPJ, 2023, "Tipo novo", Decimal("5.00"), "valid", Decimal("3.00"), "valid"),
+        (OUTRO_CNPJ, 2023, "", None, "null", None, "invalid"),
+        (TOP10_CNPJ, 2024, "Renovação", Decimal("40.00"), "valid", Decimal("35.00"), "valid"),
+        (OUTRO_CNPJ, 2024, "Expansão", Decimal("7.00"), "valid", Decimal("5.00"), "valid"),
+        (TOP10_CNPJ, 2025, "", Decimal("2.00"), "valid", Decimal("1.00"), "valid"),
+        (OUTRO_CNPJ, 2025, None, None, "invalid", None, "null"),
     ]
 
 
@@ -363,4 +377,165 @@ def test_falha_de_validacao_reverte_mart_e_coorte(tmp_path, monkeypatch):
 
     assert anterior == [("anterior",)]
     assert tabelas_coorte == 0
+
+
+def test_mart02_granularidade_tipos_status_e_reconciliacao(tmp_path, monkeypatch):
+    banco = tmp_path / "mart02_test.duckdb"
+    preparar_banco(banco, linhas_mart02())
+    conectar_teste(banco, monkeypatch)
+
+    marts.executar_mart_01()
+    resultado = marts.executar_mart_02()
+
+    assert resultado == {"linhas": 12}
+    with duckdb.connect(str(banco)) as con:
+        linhas = con.execute(
+            """
+            SELECT ano_referencia, escopo, tipo_obra, categoria_tipo_obra,
+                   total_planejado, qtd_planejados_nulos,
+                   qtd_planejados_invalidos, status_total_planejado,
+                   total_realizado, qtd_realizados_invalidos
+            FROM marts.investimentos_por_tipo
+            ORDER BY ano_referencia, escopo, tipo_obra NULLS FIRST
+            """
+        ).fetchall()
+        tipos = dict(
+            con.execute(
+                """
+                SELECT column_name, data_type
+                FROM information_schema.columns
+                WHERE table_schema = 'marts'
+                  AND table_name = 'investimentos_por_tipo'
+                """
+            ).fetchall()
+        )
+        chaves_repetidas = con.execute(
+            """
+            SELECT COUNT(*) FROM (
+                SELECT ano_referencia, escopo, tipo_obra
+                FROM marts.investimentos_por_tipo
+                GROUP BY ano_referencia, escopo, tipo_obra
+                HAVING COUNT(*) > 1
+            )
+            """
+        ).fetchone()[0]
+        total_mart01 = con.execute(
+            """
+            SELECT ano_referencia, escopo, total_planejado, total_realizado
+            FROM marts.investimentos_anuais ORDER BY ano_referencia, escopo
+            """
+        ).fetchall()
+        agregado_mart02 = con.execute(
+            """
+            SELECT ano_referencia, escopo, SUM(total_planejado), SUM(total_realizado)
+            FROM marts.investimentos_por_tipo
+            GROUP BY ano_referencia, escopo ORDER BY ano_referencia, escopo
+            """
+        ).fetchall()
+
+    assert chaves_repetidas == 0
+    assert tipos["total_planejado"].startswith("DECIMAL")
+    assert tipos["total_realizado"].startswith("DECIMAL")
+    assert len(linhas) == 12
+    assert any(
+        linha[0:4] == (2023, "nacional", "Tipo novo", "outras")
+        for linha in linhas
+    )
+    assert any(
+        linha[0:4] == (2023, "nacional", "", "sem_tipo") for linha in linhas
+    )
+    assert any(
+        linha[0:4] == (2025, "nacional", None, "sem_tipo") for linha in linhas
+    )
+    tipo_vazio = next(
+        linha for linha in linhas if linha[0:3] == (2023, "nacional", "")
+    )
+    assert tipo_vazio[5:8] == (1, 0, "null")
+    assert tipo_vazio[9] == 1
+    tipo_nulo = next(
+        linha for linha in linhas if linha[0:3] == (2025, "nacional", None)
+    )
+    assert tipo_nulo[5:8] == (0, 1, "invalid")
+    zero_valido = next(
+        linha
+        for linha in linhas
+        if linha[0:3] == (2023, "top10", "Expansão")
+    )
+    assert zero_valido[4] == Decimal("0.00")
+    assert zero_valido[5:8] == (0, 0, "valid")
+    assert total_mart01 == agregado_mart02
+
+
+def test_mart02_idempotente_e_coorte_persistente(tmp_path, monkeypatch):
+    banco = tmp_path / "mart02_idempotente.duckdb"
+    preparar_banco(banco, linhas_mart02())
+    conectar_teste(banco, monkeypatch)
+    marts.executar_mart_01()
+
+    marts.executar_mart_02()
+    with duckdb.connect(str(banco)) as con:
+        coorte_original = con.execute(
+            "SELECT posicao, cnpj, uc_dez_2025 "
+            "FROM marts.cohorte_top10_2025 ORDER BY posicao"
+        ).fetchall()
+        con.execute(
+            "UPDATE refined.indger_comerciais SET QtdUCAtiva = 999999999 "
+            "WHERE NumCNPJ = ?",
+            [COORTE_CNPJS[1]],
+        )
+
+    marts.executar_mart_02()
+
+    with duckdb.connect(str(banco)) as con:
+        total = con.execute(
+            "SELECT COUNT(*) FROM marts.investimentos_por_tipo"
+        ).fetchone()[0]
+        coorte_atual = con.execute(
+            "SELECT posicao, cnpj, uc_dez_2025 "
+            "FROM marts.cohorte_top10_2025 ORDER BY posicao"
+        ).fetchall()
+    assert total == 12
+    assert coorte_atual == coorte_original
+
+
+def test_mart02_rollback_preserva_tabela_anterior(tmp_path, monkeypatch):
+    banco = tmp_path / "mart02_rollback.duckdb"
+    preparar_banco(banco, linhas_mart02())
+    with duckdb.connect(str(banco)) as con:
+        con.execute("CREATE SCHEMA marts")
+        con.execute(
+            "CREATE TABLE marts.investimentos_por_tipo "
+            "AS SELECT 'anterior' AS marcador"
+        )
+    conectar_teste(banco, monkeypatch)
+
+    def falhar_apos_sql(con):
+        raise ValueError("falha simulada na validação")
+
+    with pytest.raises(ValueError, match="falha simulada"):
+        marts.executar_sql_mart(marts.MART_02_SQL, falhar_apos_sql)
+
+    with duckdb.connect(str(banco)) as con:
+        anterior = con.execute(
+            "SELECT marcador FROM marts.investimentos_por_tipo"
+        ).fetchall()
+        coorte = con.execute(
+            """
+            SELECT COUNT(*) FROM information_schema.tables
+            WHERE table_schema = 'marts' AND table_name = 'cohorte_top10_2025'
+            """
+        ).fetchone()[0]
+    assert anterior == [("anterior",)]
+    assert coorte == 0
+
+
+def test_mart02_bloqueia_coorte_com_duplicidade_municipal(tmp_path, monkeypatch):
+    banco = tmp_path / "mart02_duplicidade.duckdb"
+    indger = linhas_indger_dezembro()
+    indger.append(indger[0])
+    preparar_banco(banco, linhas_mart02(), indger)
+    conectar_teste(banco, monkeypatch)
+
+    with pytest.raises(ValueError, match="chave municipal duplicada"):
+        marts.executar_mart_02()
 
