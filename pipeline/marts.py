@@ -15,6 +15,7 @@ MART_04_SQL = BASE_DIR / "sql" / "marts" / "04_planejado_vs_realizado.sql"
 MART_05_SQL = BASE_DIR / "sql" / "marts" / "05_evolucao_investimentos.sql"
 MART_06_SQL = BASE_DIR / "sql" / "marts" / "06_ranking_investimentos.sql"
 MART_07_SQL = BASE_DIR / "sql" / "marts" / "07_ranking_por_uc.sql"
+MART_08_SQL = BASE_DIR / "sql" / "marts" / "08_perfil_investimentos.sql"
 ANOS_MART_01 = {2023, 2024, 2025}
 ESCOPOS_MART_01 = {"nacional", "top10"}
 
@@ -1348,6 +1349,283 @@ def executar_mart_07() -> dict[str, int]:
         _validar_mart_07,
         validacao_previa=_validar_chaves_uc_mart_07,
     )
+
+
+def _validar_mart_08(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
+    chaves = con.execute(
+        """
+        SELECT escopo, cnpj, ano_referencia, tipo_obra, classe_obra
+        FROM marts.perfil_investimentos
+        """
+    ).fetchall()
+    if not chaves:
+        raise ValueError("O MART 08 não produziu linhas.")
+    if len(set(chaves)) != len(chaves):
+        raise ValueError(
+            "O MART 08 contém duplicidade em escopo/CNPJ/ano/tipo/classe."
+        )
+    combinacoes = {(linha[0], linha[2]) for linha in chaves}
+    esperadas = {
+        (escopo, ano)
+        for escopo in ESCOPOS_MART_01
+        for ano in ANOS_MART_01
+    }
+    if combinacoes != esperadas:
+        raise ValueError(
+            "O MART 08 deve conter os anos 2023–2025 nos escopos nacional/top10; "
+            f"combinações={sorted(combinacoes)}."
+        )
+
+    duplicadas = con.execute(
+        """
+        SELECT escopo, cnpj, ano_referencia, tipo_obra, classe_obra, COUNT(*)
+        FROM marts.perfil_investimentos
+        GROUP BY escopo, cnpj, ano_referencia, tipo_obra, classe_obra
+        HAVING COUNT(*) > 1
+        ORDER BY escopo, ano_referencia, cnpj, tipo_obra, classe_obra
+        """
+    ).fetchall()
+    if duplicadas:
+        raise ValueError(f"MART 08 contém granularidade duplicada: {duplicadas[:5]}.")
+
+    tipos = dict(
+        con.execute(
+            """
+            SELECT column_name, data_type
+            FROM information_schema.columns
+            WHERE table_schema = 'marts' AND table_name = 'perfil_investimentos'
+            """
+        ).fetchall()
+    )
+    if tipos.get("cnpj") != "VARCHAR":
+        raise ValueError("O CNPJ do MART 08 deve permanecer como VARCHAR.")
+    for coluna in ("total_planejado", "total_realizado"):
+        if not tipos.get(coluna, "").startswith("DECIMAL"):
+            raise ValueError(f"{coluna} deve ser DECIMAL no MART 08.")
+    for coluna in (
+        "participacao_planejado_percentual",
+        "participacao_realizado_percentual",
+    ):
+        if tipos.get(coluna) != "DECIMAL(18,2)":
+            raise ValueError(f"{coluna} deve ser DECIMAL(18,2) no MART 08.")
+
+    cnpjs_coorte = {
+        linha[0]
+        for linha in con.execute(
+            "SELECT cnpj FROM marts.cohorte_top10_2025"
+        ).fetchall()
+    }
+    cnpj_ano_top10 = {
+        (ano, cnpj)
+        for ano, cnpj in con.execute(
+            """
+            SELECT DISTINCT ano_referencia, cnpj
+            FROM marts.perfil_investimentos
+            WHERE escopo = 'top10'
+            """
+        ).fetchall()
+    }
+    esperado_top10 = {
+        (ano, cnpj) for ano in ANOS_MART_01 for cnpj in cnpjs_coorte
+    }
+    faltantes_top10 = sorted(esperado_top10 - cnpj_ano_top10)
+    extras_top10 = sorted(cnpj_ano_top10 - esperado_top10)
+    if faltantes_top10 or extras_top10:
+        raise ValueError(
+            "O perfil top10 não preserva os dez CNPJs em cada ano: "
+            f"faltantes={faltantes_top10}; extras={extras_top10}."
+        )
+
+    percentuais_inconsistentes = con.execute(
+        """
+        SELECT COUNT(*)
+        FROM marts.perfil_investimentos
+        WHERE (status_participacao_planejado = 'valid'
+               AND participacao_planejado_percentual IS NULL)
+           OR (status_participacao_planejado <> 'valid'
+               AND participacao_planejado_percentual IS NOT NULL)
+           OR (status_participacao_realizado = 'valid'
+               AND participacao_realizado_percentual IS NULL)
+           OR (status_participacao_realizado <> 'valid'
+               AND participacao_realizado_percentual IS NOT NULL)
+        """
+    ).fetchone()[0]
+    if percentuais_inconsistentes:
+        raise ValueError(
+            "O MART 08 contém percentual incompatível com o status do denominador."
+        )
+
+    divergencias_pdd = con.execute(
+        """
+        WITH esperado_cnpj_ano AS (
+            SELECT
+                NumCPFCNPJ AS cnpj,
+                AnoReferencia AS ano_referencia,
+                COUNT(*) AS qtd_registros_pdd,
+                SUM(VlrTotalPlanejado)
+                    FILTER (WHERE VlrTotalPlanejado_status = 'valid')
+                    AS total_planejado,
+                COUNT(*) FILTER (WHERE VlrTotalPlanejado_status = 'valid')
+                    AS qtd_planejados_validos,
+                COUNT(*) FILTER (WHERE VlrTotalPlanejado_status = 'null')
+                    AS qtd_planejados_nulos,
+                COUNT(*) FILTER (WHERE VlrTotalPlanejado_status = 'invalid')
+                    AS qtd_planejados_invalidos,
+                SUM(VlrTotalRealizado)
+                    FILTER (WHERE VlrTotalRealizado_status = 'valid')
+                    AS total_realizado,
+                COUNT(*) FILTER (WHERE VlrTotalRealizado_status = 'valid')
+                    AS qtd_realizados_validos,
+                COUNT(*) FILTER (WHERE VlrTotalRealizado_status = 'null')
+                    AS qtd_realizados_nulos,
+                COUNT(*) FILTER (WHERE VlrTotalRealizado_status = 'invalid')
+                    AS qtd_realizados_invalidos
+            FROM refined.pdd
+            WHERE AnoReferencia BETWEEN 2023 AND 2025
+            GROUP BY NumCPFCNPJ, AnoReferencia
+        ), esperado_escopo AS (
+            SELECT e.*, 'nacional' AS escopo
+            FROM esperado_cnpj_ano AS e
+            UNION ALL
+            SELECT e.*, 'top10' AS escopo
+            FROM esperado_cnpj_ano AS e
+            INNER JOIN marts.cohorte_top10_2025 AS c ON e.cnpj = c.cnpj
+        ), agregado_perfil AS (
+            SELECT
+                cnpj,
+                ano_referencia,
+                escopo,
+                SUM(qtd_registros_pdd) AS qtd_registros_pdd,
+                SUM(total_planejado) AS total_planejado,
+                SUM(qtd_planejados_validos) AS qtd_planejados_validos,
+                SUM(qtd_planejados_nulos) AS qtd_planejados_nulos,
+                SUM(qtd_planejados_invalidos) AS qtd_planejados_invalidos,
+                SUM(total_realizado) AS total_realizado,
+                SUM(qtd_realizados_validos) AS qtd_realizados_validos,
+                SUM(qtd_realizados_nulos) AS qtd_realizados_nulos,
+                SUM(qtd_realizados_invalidos) AS qtd_realizados_invalidos
+            FROM marts.perfil_investimentos
+            GROUP BY cnpj, ano_referencia, escopo
+        )
+        SELECT COUNT(*)
+        FROM esperado_escopo AS e
+        FULL OUTER JOIN agregado_perfil AS p
+          ON e.cnpj IS NOT DISTINCT FROM p.cnpj
+         AND e.ano_referencia = p.ano_referencia
+         AND e.escopo = p.escopo
+        WHERE e.ano_referencia IS NULL OR p.ano_referencia IS NULL
+           OR e.qtd_registros_pdd IS DISTINCT FROM p.qtd_registros_pdd
+           OR e.total_planejado IS DISTINCT FROM p.total_planejado
+           OR e.qtd_planejados_validos IS DISTINCT FROM p.qtd_planejados_validos
+           OR e.qtd_planejados_nulos IS DISTINCT FROM p.qtd_planejados_nulos
+           OR e.qtd_planejados_invalidos
+                IS DISTINCT FROM p.qtd_planejados_invalidos
+           OR e.total_realizado IS DISTINCT FROM p.total_realizado
+           OR e.qtd_realizados_validos IS DISTINCT FROM p.qtd_realizados_validos
+           OR e.qtd_realizados_nulos IS DISTINCT FROM p.qtd_realizados_nulos
+           OR e.qtd_realizados_invalidos
+                IS DISTINCT FROM p.qtd_realizados_invalidos
+        """
+    ).fetchone()[0]
+    if divergencias_pdd:
+        raise ValueError(
+            "O MART 08 não reconcilia por CNPJ/ano com refined.pdd; "
+            f"divergências={divergencias_pdd}."
+        )
+
+    divergencias_mart01 = con.execute(
+        """
+        WITH agregado AS (
+            SELECT
+                ano_referencia,
+                escopo,
+                SUM(qtd_registros_pdd) AS qtd_registros_pdd,
+                SUM(total_planejado) AS total_planejado,
+                SUM(qtd_planejados_validos) AS qtd_planejados_validos,
+                SUM(qtd_planejados_nulos) AS qtd_planejados_nulos,
+                SUM(qtd_planejados_invalidos) AS qtd_planejados_invalidos,
+                SUM(total_realizado) AS total_realizado,
+                SUM(qtd_realizados_validos) AS qtd_realizados_validos,
+                SUM(qtd_realizados_nulos) AS qtd_realizados_nulos,
+                SUM(qtd_realizados_invalidos) AS qtd_realizados_invalidos
+            FROM marts.perfil_investimentos
+            GROUP BY ano_referencia, escopo
+        )
+        SELECT COUNT(*)
+        FROM agregado AS p
+        FULL OUTER JOIN marts.investimentos_anuais AS a
+          ON p.ano_referencia = a.ano_referencia AND p.escopo = a.escopo
+        WHERE p.ano_referencia IS NULL OR a.ano_referencia IS NULL
+           OR p.qtd_registros_pdd IS DISTINCT FROM a.qtd_registros_pdd
+           OR p.total_planejado IS DISTINCT FROM a.total_planejado
+           OR p.qtd_planejados_validos IS DISTINCT FROM a.qtd_planejados_validos
+           OR p.qtd_planejados_nulos IS DISTINCT FROM a.qtd_planejados_nulos
+           OR p.qtd_planejados_invalidos IS DISTINCT FROM a.qtd_planejados_invalidos
+           OR p.total_realizado IS DISTINCT FROM a.total_realizado
+           OR p.qtd_realizados_validos IS DISTINCT FROM a.qtd_realizados_validos
+           OR p.qtd_realizados_nulos IS DISTINCT FROM a.qtd_realizados_nulos
+           OR p.qtd_realizados_invalidos IS DISTINCT FROM a.qtd_realizados_invalidos
+        """
+    ).fetchone()[0]
+    if divergencias_mart01:
+        raise ValueError(
+            "O MART 08 não reconcilia com o MART 01; "
+            f"divergências={divergencias_mart01}."
+        )
+
+    divergencias_mart02 = con.execute(
+        """
+        WITH agregado AS (
+            SELECT
+                ano_referencia,
+                escopo,
+                tipo_obra,
+                SUM(qtd_registros_pdd) AS qtd_registros_pdd,
+                SUM(total_planejado) AS total_planejado,
+                SUM(qtd_planejados_validos) AS qtd_planejados_validos,
+                SUM(qtd_planejados_nulos) AS qtd_planejados_nulos,
+                SUM(qtd_planejados_invalidos) AS qtd_planejados_invalidos,
+                SUM(total_realizado) AS total_realizado,
+                SUM(qtd_realizados_validos) AS qtd_realizados_validos,
+                SUM(qtd_realizados_nulos) AS qtd_realizados_nulos,
+                SUM(qtd_realizados_invalidos) AS qtd_realizados_invalidos
+            FROM marts.perfil_investimentos
+            GROUP BY ano_referencia, escopo, tipo_obra
+        )
+        SELECT COUNT(*)
+        FROM agregado AS p
+        FULL OUTER JOIN marts.investimentos_por_tipo AS t
+          ON p.ano_referencia = t.ano_referencia
+         AND p.escopo = t.escopo
+         AND p.tipo_obra IS NOT DISTINCT FROM t.tipo_obra
+        WHERE p.ano_referencia IS NULL OR t.ano_referencia IS NULL
+           OR p.qtd_registros_pdd IS DISTINCT FROM t.qtd_registros_pdd
+           OR p.total_planejado IS DISTINCT FROM t.total_planejado
+           OR p.qtd_planejados_validos IS DISTINCT FROM t.qtd_planejados_validos
+           OR p.qtd_planejados_nulos IS DISTINCT FROM t.qtd_planejados_nulos
+           OR p.qtd_planejados_invalidos IS DISTINCT FROM t.qtd_planejados_invalidos
+           OR p.total_realizado IS DISTINCT FROM t.total_realizado
+           OR p.qtd_realizados_validos IS DISTINCT FROM t.qtd_realizados_validos
+           OR p.qtd_realizados_nulos IS DISTINCT FROM t.qtd_realizados_nulos
+           OR p.qtd_realizados_invalidos IS DISTINCT FROM t.qtd_realizados_invalidos
+        """
+    ).fetchone()[0]
+    if divergencias_mart02:
+        raise ValueError(
+            "O MART 08, somado sobre classes, não reconcilia com o MART 02; "
+            f"divergências={divergencias_mart02}."
+        )
+
+    return {
+        "linhas": len(chaves),
+        "linhas_top10": sum(linha[0] == "top10" for linha in chaves),
+        "linhas_nacionais": sum(linha[0] == "nacional" for linha in chaves),
+    }
+
+
+def executar_mart_08() -> dict[str, int]:
+    """Executa o perfil de investimentos na transação compartilhada."""
+    return executar_sql_mart(MART_08_SQL, _validar_mart_08)
 
 
 if __name__ == "__main__":
