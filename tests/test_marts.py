@@ -161,6 +161,39 @@ def linhas_mart05():
     ]
 
 
+def linhas_mart06():
+    linhas = [
+        (COORTE_CNPJS[0], 2023, "Expansão", Decimal("100.00"), "valid", Decimal("10.00"), "valid"),
+        (COORTE_CNPJS[1], 2023, "Melhoria", Decimal("100.00"), "valid", Decimal("80.00"), "valid"),
+        (COORTE_CNPJS[2], 2023, "Renovação", Decimal("0.00"), "valid", Decimal("0.00"), "valid"),
+        (COORTE_CNPJS[3], 2023, "Expansão", None, "null", Decimal("90.00"), "valid"),
+        (COORTE_CNPJS[4], 2023, "Melhoria", None, "invalid", None, "null"),
+        (COORTE_CNPJS[4], 2023, "Melhoria", Decimal("500.00"), "valid", Decimal("1.00"), "valid"),
+        (OUTRO_CNPJ, 2023, "Expansão", Decimal("200.00"), "valid", Decimal("150.00"), "valid"),
+        (COORTE_CNPJS[0], 2024, "Expansão", Decimal("50.00"), "valid", Decimal("70.00"), "valid"),
+        (OUTRO_CNPJ, 2024, "Melhoria", Decimal("50.00"), "valid", Decimal("20.00"), "valid"),
+        (COORTE_CNPJS[0], 2025, "Renovação", Decimal("100.00"), "valid", Decimal("300.00"), "valid"),
+        (COORTE_CNPJS[1], 2025, "Melhoria", Decimal("200.00"), "valid", Decimal("100.00"), "valid"),
+        (OUTRO_CNPJ, 2025, "Expansão", Decimal("250.00"), "valid", Decimal("150.00"), "valid"),
+    ]
+    pares_existentes = {(linha[0], linha[1]) for linha in linhas}
+    linhas.extend(
+        (
+            cnpj,
+            ano,
+            "Expansão",
+            Decimal("0.00"),
+            "valid",
+            Decimal("0.00"),
+            "valid",
+        )
+        for ano in (2023, 2024, 2025)
+        for cnpj in COORTE_CNPJS
+        if (cnpj, ano) not in pares_existentes
+    )
+    return linhas
+
+
 def linhas_indger_mart03():
     linhas = [
         (
@@ -1282,4 +1315,182 @@ def test_mart05_rollback_preserva_as_duas_series(tmp_path, monkeypatch):
         ).fetchall()
     assert anterior_distribuidora == [("anterior_distribuidora",)]
     assert anterior_agregada == [("anterior_agregada",)]
+
+
+def test_mart06_rankings_separados_reconciliam_e_preservam_status(
+    tmp_path, monkeypatch
+):
+    banco = tmp_path / "mart06_test.duckdb"
+    preparar_banco(banco, linhas_mart06())
+    conectar_teste(banco, monkeypatch)
+
+    # Executa a cadeia existente para comprovar integração e permitir reconciliação.
+    marts.executar_mart_01()
+    marts.executar_mart_02()
+    marts.executar_mart_03()
+    marts.executar_mart_04()
+    marts.executar_mart_05()
+    resultado = marts.executar_mart_06()
+    assert resultado == {"linhas": 126}
+
+    with duckdb.connect(str(banco)) as con:
+        linhas = con.execute(
+            """
+            SELECT ano_referencia, cnpj, escopo, medida, valor_investimento,
+                   status_valor, top10_2025, posicao, rotulo_pdd, rotulo_indger
+            FROM marts.ranking_investimentos
+            WHERE ano_referencia = 2023
+            ORDER BY escopo, medida, posicao NULLS LAST, cnpj
+            """
+        ).fetchall()
+        chaves_duplicadas = con.execute(
+            """
+            SELECT COUNT(*) FROM (
+                SELECT ano_referencia, cnpj, escopo, medida
+                FROM marts.ranking_investimentos
+                GROUP BY ano_referencia, cnpj, escopo, medida
+                HAVING COUNT(*) > 1
+            )
+            """
+        ).fetchone()[0]
+        tipos = dict(
+            con.execute(
+                """
+                SELECT column_name, data_type
+                FROM information_schema.columns
+                WHERE table_schema = 'marts'
+                  AND table_name = 'ranking_investimentos'
+                """
+            ).fetchall()
+        )
+        coorte = con.execute(
+            "SELECT cnpj FROM marts.cohorte_top10_2025 ORDER BY posicao"
+        ).fetchall()
+        escopo_top10_cnpjs = con.execute(
+            """
+            SELECT DISTINCT cnpj
+            FROM marts.ranking_investimentos
+            WHERE escopo = 'top10'
+            """
+        ).fetchall()
+
+    def buscar(cnpj, escopo, medida):
+        return next(
+            row
+            for row in linhas
+            if row[1:4] == (cnpj, escopo, medida)
+        )
+
+    fora = buscar(OUTRO_CNPJ, "nacional", "planejado")
+    assert fora[4:8] == (Decimal("200.00"), "valid", False, 1)
+    assert fora[8:] == (f"Agente {OUTRO_CNPJ}", None)
+
+    empatados_nacional = buscar(COORTE_CNPJS[0], "nacional", "planejado")
+    empatados_top10 = buscar(COORTE_CNPJS[0], "top10", "planejado")
+    assert empatados_nacional[4] == empatados_top10[4] == Decimal("100.00")
+    assert empatados_nacional[7] == 2
+    assert empatados_top10[7] == 1
+    assert buscar(COORTE_CNPJS[1], "top10", "planejado")[7] == 2
+
+    # O realizado tem uma ordem independente da classificação planejada.
+    assert buscar(COORTE_CNPJS[3], "nacional", "realizado")[7] == 2
+    assert buscar(COORTE_CNPJS[1], "nacional", "realizado")[7] == 3
+    assert buscar(COORTE_CNPJS[0], "nacional", "realizado")[7] == 4
+    assert buscar(COORTE_CNPJS[0], "top10", "realizado")[7] == 3
+
+    zero = buscar(COORTE_CNPJS[2], "nacional", "planejado")
+    assert zero[4:8] == (Decimal("0.00"), "valid", True, 8)
+    nulo = buscar(COORTE_CNPJS[3], "nacional", "planejado")
+    assert nulo[4:8] == (None, "null", True, None)
+    invalido = buscar(COORTE_CNPJS[4], "nacional", "planejado")
+    assert invalido[4:8] == (Decimal("500.00"), "invalid", True, None)
+    parcial = buscar(COORTE_CNPJS[4], "nacional", "realizado")
+    assert parcial[4:8] == (Decimal("1.00"), "partial", True, None)
+    assert chaves_duplicadas == 0
+    assert tipos["cnpj"] == "VARCHAR"
+    assert tipos["valor_investimento"].startswith("DECIMAL")
+    assert [linha[0] for linha in coorte] == COORTE_CNPJS
+    assert set(escopo_top10_cnpjs) <= set(coorte)
+
+
+def test_mart06_idempotente(tmp_path, monkeypatch):
+    banco = tmp_path / "mart06_idempotente.duckdb"
+    preparar_banco(banco, linhas_mart06())
+    conectar_teste(banco, monkeypatch)
+    marts.executar_mart_01()
+
+    marts.executar_mart_06()
+    with duckdb.connect(str(banco)) as con:
+        primeira = con.execute(
+            "SELECT * FROM marts.ranking_investimentos "
+            "ORDER BY ano_referencia, escopo, medida, posicao NULLS LAST, cnpj"
+        ).fetchall()
+    marts.executar_mart_06()
+    with duckdb.connect(str(banco)) as con:
+        segunda = con.execute(
+            "SELECT * FROM marts.ranking_investimentos "
+            "ORDER BY ano_referencia, escopo, medida, posicao NULLS LAST, cnpj"
+        ).fetchall()
+    assert segunda == primeira
+
+
+def test_mart06_bloqueia_coorte_top10_incompleta_ou_duplicada(
+    tmp_path, monkeypatch
+):
+    banco = tmp_path / "mart06_coorte_incompleta.duckdb"
+    preparar_banco(banco, linhas_mart06())
+    conectar_teste(banco, monkeypatch)
+    marts.executar_mart_01()
+    marts.executar_mart_06()
+
+    with duckdb.connect(str(banco)) as con:
+        con.execute(
+            """
+            DELETE FROM marts.ranking_investimentos
+            WHERE ano_referencia = 2024 AND escopo = 'top10'
+              AND medida = 'planejado' AND cnpj = ?
+            """,
+            [COORTE_CNPJS[0]],
+        )
+        with pytest.raises(ValueError, match="coorte.*incompleta.*faltantes"):
+            marts._validar_mart_06(con)
+
+    # Recria o resultado válido e confirma que a duplicação também é diagnosticada.
+    marts.executar_mart_06()
+    with duckdb.connect(str(banco)) as con:
+        con.execute(
+            """
+            INSERT INTO marts.ranking_investimentos
+            SELECT * FROM marts.ranking_investimentos
+            WHERE ano_referencia = 2024 AND escopo = 'top10'
+              AND medida = 'planejado' AND cnpj = ?
+            """,
+            [COORTE_CNPJS[0]],
+        )
+        with pytest.raises(ValueError, match="top10 contém CNPJ/ano/medida duplicado"):
+            marts._validar_mart_06(con)
+
+
+def test_mart06_rollback_preserva_tabela_anterior(tmp_path, monkeypatch):
+    banco = tmp_path / "mart06_rollback.duckdb"
+    preparar_banco(banco, linhas_mart06())
+    with duckdb.connect(str(banco)) as con:
+        con.execute("CREATE SCHEMA marts")
+        con.execute(
+            "CREATE TABLE marts.ranking_investimentos "
+            "AS SELECT 'anterior' AS marcador"
+        )
+    conectar_teste(banco, monkeypatch)
+
+    def falhar_apos_sql(con):
+        raise ValueError("falha simulada após materializar MART 06")
+
+    with pytest.raises(ValueError, match="falha simulada após materializar"):
+        marts.executar_sql_mart(marts.MART_06_SQL, falhar_apos_sql)
+
+    with duckdb.connect(str(banco)) as con:
+        anterior = con.execute(
+            "SELECT marcador FROM marts.ranking_investimentos"
+        ).fetchall()
+    assert anterior == [("anterior",)]
 
