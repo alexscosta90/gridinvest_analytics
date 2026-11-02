@@ -9,6 +9,7 @@ import streamlit as st
 
 from dashboard.data import calcular_taxa_execucao, formatar_reais
 from dashboard.metadata import METADADOS_POR_CNPJ, nome_marca
+from dashboard.responsive import renderizar_grade_metricas
 from dashboard.visuals import formatar_bilhoes, rotulo_grafico
 
 
@@ -42,8 +43,7 @@ def preparar_dados_pagina(dados: dict[str, Any], ano: int) -> dict[str, Any]:
         for cnpj in membros
     }
     rotulos = {
-        cnpj: rotulo_grafico(cnpj, nomes[cnpj], sorted(membros))
-        for cnpj in membros
+        cnpj: rotulo_grafico(cnpj, nomes[cnpj], sorted(membros)) for cnpj in membros
     }
 
     linhas = []
@@ -96,9 +96,15 @@ def preparar_dados_pagina(dados: dict[str, Any], ano: int) -> dict[str, Any]:
         )
     )
 
-    planejados_completos = all(linha["planejado_valido"] is not None for linha in linhas)
-    realizados_completos = all(linha["realizado_valido"] is not None for linha in linhas)
-    diferencas_completas = all(linha["diferenca_valida"] is not None for linha in linhas)
+    planejados_completos = all(
+        linha["planejado_valido"] is not None for linha in linhas
+    )
+    realizados_completos = all(
+        linha["realizado_valido"] is not None for linha in linhas
+    )
+    diferencas_completas = all(
+        linha["diferenca_valida"] is not None for linha in linhas
+    )
 
     soma_planejada = (
         sum((linha["planejado_valido"] for linha in linhas), start=Decimal(0))
@@ -187,21 +193,47 @@ def renderizar_pagina(dados: dict[str, Any], ano: int) -> None:
     st.subheader("Planejado x Realizado", anchor=False)
 
     indicadores = (
-        ("Investimento planejado", formatar_bilhoes(kpis["planejado"]), ":material/event_note:", "blue"),
-        ("Investimento realizado", formatar_bilhoes(kpis["realizado"]), ":material/payments:", "green"),
+        (
+            "Investimento planejado",
+            formatar_bilhoes(kpis["planejado"]),
+            ":material/event_note:",
+            "blue",
+        ),
+        (
+            "Investimento realizado",
+            formatar_bilhoes(kpis["realizado"]),
+            ":material/payments:",
+            "green",
+        ),
         (
             "Execução do planejado",
-            f"{kpis['execucao']:.2f}%" if kpis["execucao"] is not None else "Não disponível",
+            f"{kpis['execucao']:.2f}%"
+            if kpis["execucao"] is not None
+            else "Não disponível",
             ":material/percent:",
             "violet",
         ),
-        ("Diferença financeira", _formatar_diferenca_bilhoes(kpis["diferenca"]), ":material/compare_arrows:", "orange"),
+        (
+            "Diferença financeira",
+            _formatar_diferenca_bilhoes(kpis["diferenca"]),
+            ":material/compare_arrows:",
+            "orange",
+        ),
     )
-    with st.container(horizontal=True):
-        for titulo, valor, icone, cor in indicadores:
-            with st.container(border=True):
-                st.badge(titulo, icon=icone, color=cor)
-                st.metric(f"{ano} · coorte fixa", valor, border=False)
+    renderizar_grade_metricas(
+        [
+            {
+                "title": titulo,
+                "label": f"{ano} · coorte fixa",
+                "value": valor,
+                "icon": icone,
+                "color": cor,
+            }
+            for titulo, valor, icone, cor in indicadores
+        ],
+        chave="planejado-realizado",
+        colunas_desktop=4,
+    )
 
     if not all(preparados["reconciliacoes"].values()):
         st.warning(
@@ -213,14 +245,15 @@ def renderizar_pagina(dados: dict[str, Any], ano: int) -> None:
         construir_grafico_colunas(linhas, ano),
         width="stretch",
         alt=f"Investimentos planejados e realizados por distribuidora em {ano}",
+        key="gridinvest-chart-planejado-realizado",
     )
     _renderizar_tabela(linhas)
-    st.caption("Fonte: dados públicos da ANEEL · MART 01 e MART 04 · coorte fixa top 10.")
+    st.caption(
+        "Fonte: dados públicos da ANEEL · MART 01 e MART 04 · coorte fixa top 10."
+    )
 
 
-def construir_grafico_colunas(
-    linhas: list[dict[str, Any]], ano: int
-) -> alt.Chart:
+def construir_grafico_colunas(linhas: list[dict[str, Any]], ano: int) -> alt.Chart:
     """Cria duas colunas financeiras agrupadas para cada distribuidora."""
     ordem = [linha["rotulo"] for linha in linhas]
     registros = []
@@ -242,12 +275,8 @@ def construir_grafico_colunas(
                         if valor is not None
                         else None
                     ),
-                    "Planejado completo": formatar_reais(
-                        linha["planejado_valido"]
-                    ),
-                    "Realizado completo": formatar_reais(
-                        linha["realizado_valido"]
-                    ),
+                    "Planejado completo": formatar_reais(linha["planejado_valido"]),
+                    "Realizado completo": formatar_reais(linha["realizado_valido"]),
                 }
             )
     return (
@@ -345,4 +374,5 @@ def _renderizar_tabela(linhas: list[dict[str, Any]]) -> None:
         height=420,
         width="stretch",
         row_height=36,
+        key="gridinvest-table-planejado-realizado",
     )

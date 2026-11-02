@@ -32,6 +32,10 @@ from dashboard.perfil_investimentos import (
 from dashboard.planejado_realizado import (
     renderizar_pagina as renderizar_planejado_realizado,
 )
+from dashboard.responsive import (
+    injetar_estilos_responsivos,
+    renderizar_grade_metricas,
+)
 from dashboard.summary_table import imagem_distribuidora
 from dashboard.visuals import (
     formatar_bilhoes,
@@ -45,6 +49,7 @@ st.set_page_config(
     page_icon=":material/bolt:",
     layout="wide",
 )
+injetar_estilos_responsivos()
 
 with st.sidebar:
     st.title("GridInvest", icon=":material/bolt:")
@@ -122,45 +127,50 @@ taxa = calcular_taxa_execucao(
 )
 
 
-with st.container(horizontal=True):
-    indicadores = (
-        (
-            "Investimento planejado",
-            f"Planejado · {ano_selecionado}",
-            formatar_bilhoes(planejado),
-            ":material/account_balance_wallet:",
-            "blue",
-            f"Valor integral: {formatar_valor_validado(planejado, registro_ano['status_planejado'])}",
+indicadores = (
+    {
+        "title": "Investimento planejado",
+        "label": f"Planejado · {ano_selecionado}",
+        "value": formatar_bilhoes(planejado),
+        "icon": ":material/account_balance_wallet:",
+        "color": "blue",
+        "help": (
+            "Valor integral: "
+            f"{formatar_valor_validado(planejado, registro_ano['status_planejado'])}"
         ),
-        (
-            "Investimento realizado",
-            f"Realizado · {ano_selecionado}",
-            formatar_bilhoes(realizado),
-            ":material/payments:",
-            "green",
-            f"Valor integral: {formatar_valor_validado(realizado, registro_ano['status_realizado'])}",
+    },
+    {
+        "title": "Investimento realizado",
+        "label": f"Realizado · {ano_selecionado}",
+        "value": formatar_bilhoes(realizado),
+        "icon": ":material/payments:",
+        "color": "green",
+        "help": (
+            "Valor integral: "
+            f"{formatar_valor_validado(realizado, registro_ano['status_realizado'])}"
         ),
-        (
-            "Execução financeira",
-            "Taxa de execução",
-            f"{taxa:.2f}%" if taxa is not None else "Não disponível",
-            ":material/speed:",
-            "violet",
-            "Investimento realizado dividido pelo planejado; considera somente valores válidos.",
+    },
+    {
+        "title": "Execução financeira",
+        "label": "Taxa de execução",
+        "value": f"{taxa:.2f}%" if taxa is not None else "Não disponível",
+        "icon": ":material/speed:",
+        "color": "violet",
+        "help": (
+            "Investimento realizado dividido pelo planejado; "
+            "considera somente valores válidos."
         ),
-        (
-            "Distribuidoras analisadas",
-            "Distribuidoras",
-            str(dados["quantidade_coorte"]),
-            ":material/domain:",
-            "orange",
-            "CNPJs da coorte fixa selecionada pelas UCs ativas de dezembro de 2025.",
-        ),
-    )
-    for titulo, rotulo, valor, icone, cor, ajuda in indicadores:
-        with st.container(border=True):
-            st.badge(titulo, icon=icone, color=cor)
-            st.metric(rotulo, valor, border=False, help=ajuda)
+    },
+    {
+        "title": "Distribuidoras analisadas",
+        "label": "Distribuidoras",
+        "value": str(dados["quantidade_coorte"]),
+        "icon": ":material/domain:",
+        "color": "orange",
+        "help": "CNPJs da coorte fixa selecionada pelas UCs ativas de dezembro de 2025.",
+    },
+)
+renderizar_grade_metricas(indicadores, chave="visao-geral", colunas_desktop=4)
 
 ranking_ano = sorted(
     (linha for linha in dados["ranking"] if linha["ano"] == ano_selecionado),
@@ -377,6 +387,7 @@ rotulos_totais = (
 st.altair_chart(
     alt.layer(grafico_tipos, rotulos_totais),
     width="stretch",
+    key="gridinvest-chart-visao-geral",
     alt=(
         "Ranking das dez distribuidoras por investimento total realizado, "
         "dividido entre Expansão, Melhoria e Renovação"
@@ -456,8 +467,9 @@ df_resumo = pd.DataFrame(
     [
         {
             "Posição": linha["posição"],
-            "Distribuidora": (
-                f"![{nome_marca(linha['cnpj'], '')}]({linha['logo_marca_uf']})"
+            "Logo": linha["logo_marca_uf"],
+            "Distribuidora": rotulo_grafico(
+                linha["cnpj"], nome_marca(linha["cnpj"], ""), cnpjs
             ),
             "Investimento realizado (R$ bi)": (
                 f"R$ {numero_brasileiro(linha['realizado'] / Decimal(1_000_000_000))} bi"
@@ -478,24 +490,29 @@ df_resumo = pd.DataFrame(
         for linha in linhas_resumo
     ]
 )
-larguras_colunas = ("70px", "230px", "185px", "170px", "187px")
-estilos_colunas = [
-    {
-        "selector": f"th.col{indice}, td.col{indice}",
-        "props": [
-            ("width", largura),
-            ("min-width", largura),
-            ("max-width", largura),
-            ("padding", "5px 8px"),
-            ("text-align", "right" if indice != 1 else "left"),
-        ],
-    }
-    for indice, largura in enumerate(larguras_colunas)
-]
-st.table(
-    df_resumo.style.set_table_styles(estilos_colunas),
+st.dataframe(
+    df_resumo,
+    column_config={
+        "Posição": st.column_config.NumberColumn("Posição", width="small", format="%d"),
+        "Logo": st.column_config.ImageColumn(
+            "Logo", width="small", help="Marca e UF da distribuidora"
+        ),
+        "Distribuidora": st.column_config.TextColumn("Distribuidora", width="medium"),
+        "Investimento realizado (R$ bi)": st.column_config.TextColumn(
+            "Investimento realizado (R$ bi)", width="medium"
+        ),
+        "Execução financeira (%)": st.column_config.TextColumn(
+            "Execução financeira (%)", width="small"
+        ),
+        "Realizado por UC (R$/UC)": st.column_config.TextColumn(
+            "Realizado por UC (R$/UC)", width="medium"
+        ),
+    },
     hide_index=True,
-    width=842,
+    width="stretch",
+    height=420,
+    row_height=40,
+    key="gridinvest-table-visao-geral",
     alt=f"Resumo ordenável das dez distribuidoras da coorte em {ano_selecionado}",
 )
 

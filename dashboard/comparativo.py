@@ -152,7 +152,7 @@ def renderizar_grafico_investimento_uc(dados: dict, ano: int) -> None:
         "distribuidora:N",
         sort=ordem,
         title=None,
-            axis=alt.Axis(labelFontSize=16, labelLimit=260, labelPadding=10),
+        axis=alt.Axis(labelFontSize=16, labelLimit=260, labelPadding=10),
     )
     barras = (
         alt.Chart(df)
@@ -202,6 +202,7 @@ def renderizar_grafico_investimento_uc(dados: dict, ano: int) -> None:
         alt.layer(barras, rotulos).properties(height=480),
         width="stretch",
         alt=f"Ranking de investimento realizado por UC das dez distribuidoras em {ano}",
+        key="gridinvest-chart-comparativo-ranking-uc",
     )
     st.caption(
         "Destaque turquesa: três maiores valores de R$/UC. Os rótulos ao fim das "
@@ -227,7 +228,7 @@ def renderizar_comparativo_top10(dados: dict, ano: int) -> None:
     renderizar_grafico_investimento_uc(dados, ano)
 
     st.markdown("#### Três maiores investimentos realizados no ano")
-    colunas_destaque = st.columns(3, gap="medium")
+    colunas_destaque = st.columns(3, gap="medium", wrap=True)
     for coluna, distribuidora in zip(colunas_destaque, ranking[:3], strict=True):
         with coluna, st.container(border=True):
             renderizar_card_distribuidora(
@@ -237,7 +238,7 @@ def renderizar_comparativo_top10(dados: dict, ano: int) -> None:
     st.markdown("#### Demais distribuidoras da coorte")
     restantes = ranking[3:]
     for inicio in range(0, len(restantes), 3):
-        colunas = st.columns(3, gap="small")
+        colunas = st.columns(3, gap="small", wrap=True)
         for coluna, distribuidora in zip(
             colunas, restantes[inicio : inicio + 3], strict=False
         ):

@@ -1,7 +1,6 @@
 """Página de análise do investimento por unidade consumidora."""
 
 from decimal import ROUND_HALF_UP, Decimal
-from html import escape
 from typing import Any
 
 import altair as alt
@@ -10,6 +9,7 @@ import streamlit as st
 
 from dashboard.comparativo import preparar_ranking_investimento_uc
 from dashboard.data import formatar_reais
+from dashboard.responsive import renderizar_grade_metricas
 from dashboard.summary_table import imagem_distribuidora
 
 
@@ -34,8 +34,7 @@ def preparar_dados_pagina(dados: dict[str, Any], ano: int) -> list[dict[str, Any
         mart03 = mart03_por_cnpj.get(linha["cnpj"], {})
         total_mart03 = mart03.get("total_realizado")
         total_valido = (
-            mart03.get("status_total_realizado") == "valid"
-            and total_mart03 is not None
+            mart03.get("status_total_realizado") == "valid" and total_mart03 is not None
         )
         total_mart06 = linha["total_realizado"]
         total_mart06_valido = linha.get("status_total_realizado_mart06") == "valid"
@@ -47,9 +46,7 @@ def preparar_dados_pagina(dados: dict[str, Any], ano: int) -> list[dict[str, Any
         linha["status_cobertura_mart03"] = mart03.get(
             "status_cobertura", "sem_referencia"
         )
-        linha["status_realizado_por_uc"] = mart03.get(
-            "status", "sem_referencia"
-        )
+        linha["status_realizado_por_uc"] = mart03.get("status", "sem_referencia")
         linha["total_reconciliado"] = bool(
             total_valido
             and total_mart06_valido
@@ -62,9 +59,7 @@ def preparar_dados_pagina(dados: dict[str, Any], ano: int) -> list[dict[str, Any
             and linha["qtd_uc"] is not None
             and mart03["qtd_uc_dezembro"] == linha["qtd_uc"]
         )
-        linha["total_realizado"] = (
-            total_mart03 if linha["total_reconciliado"] else None
-        )
+        linha["total_realizado"] = total_mart03 if linha["total_reconciliado"] else None
 
     return linhas
 
@@ -82,15 +77,12 @@ def calcular_kpis_coorte(linhas: list[dict[str, Any]]) -> dict[str, Any]:
             for linha in linhas
         )
     )
-    total_uc = (
-        sum(linha["qtd_uc"] for linha in linhas) if unidades_completas else None
-    )
+    total_uc = sum(linha["qtd_uc"] for linha in linhas) if unidades_completas else None
 
     investimentos_completos = unidades_completas and all(
         linha["total_reconciliado"]
         and linha["uc_reconciliada"]
-        and linha["status_realizado_por_uc"]
-        in {"valid", "denominador_zero"}
+        and linha["status_realizado_por_uc"] in {"valid", "denominador_zero"}
         and (
             linha["status_realizado_por_uc"] != "denominador_zero"
             or linha["qtd_uc"] == 0
@@ -112,7 +104,9 @@ def calcular_kpis_coorte(linhas: list[dict[str, Any]]) -> dict[str, Any]:
         key=lambda linha: (-linha["valor"], linha["cnpj"]),
         default=None,
     )
-    menor = min(validos, key=lambda linha: (linha["valor"], linha["cnpj"]), default=None)
+    menor = min(
+        validos, key=lambda linha: (linha["valor"], linha["cnpj"]), default=None
+    )
     divergencias = [
         linha["cnpj"]
         for linha in linhas
@@ -144,47 +138,51 @@ def renderizar_pagina_investimento_uc(dados: dict[str, Any], ano: int) -> None:
     kpis = calcular_kpis_coorte(linhas)
     st.subheader("Investimento por Unidade Consumidora", anchor=False)
 
-    with st.container(horizontal=True):
-        for titulo, item, cor, icone in (
-            ("Maior investimento realizado por UC", kpis["maior"], "green", ":material/trending_up:"),
-            ("Menor investimento realizado por UC", kpis["menor"], "blue", ":material/trending_down:"),
-        ):
-            with st.container(border=True):
-                st.badge(titulo, color=cor, icon=icone)
-                st.metric(
-                    "R$/UC",
-                    formatar_reais(item["valor"] if item else None),
-                    border=False,
-                )
-                st.caption(_nome_uf(item) if item else "Indicador indisponível")
-
-        with st.container(border=True):
-            st.badge("Unidades consumidoras", color="violet", icon=":material/groups:")
-            st.metric(
-                f"UCs ativas · dezembro {ano}",
-                (
-                    f"{kpis['qtd_uc']:,}".replace(",", ".")
-                    if kpis["qtd_uc"] is not None
-                    else "Não disponível"
+    renderizar_grade_metricas(
+        [
+            {
+                "title": "Maior investimento realizado por UC",
+                "label": "R$/UC",
+                "value": formatar_reais(kpis["maior"]["valor"] if kpis["maior"] else None),
+                "icon": ":material/trending_up:",
+                "color": "green",
+                "caption": _nome_uf(kpis["maior"]) if kpis["maior"] else "Indicador indispon\u00edvel",
+            },
+            {
+                "title": "Menor investimento realizado por UC",
+                "label": "R$/UC",
+                "value": formatar_reais(kpis["menor"]["valor"] if kpis["menor"] else None),
+                "icon": ":material/trending_down:",
+                "color": "blue",
+                "caption": _nome_uf(kpis["menor"]) if kpis["menor"] else "Indicador indispon\u00edvel",
+            },
+            {
+                "title": "Unidades consumidoras",
+                "label": f"UCs ativas \u00b7 dezembro {ano}",
+                "value": f"{kpis['qtd_uc']:,}".replace(",", ".") if kpis["qtd_uc"] is not None else "N\u00e3o dispon\u00edvel",
+                "icon": ":material/groups:",
+                "color": "violet",
+                "caption": "Coorte fixa de dez distribuidoras",
+            },
+            {
+                "title": "Indicador agregado da coorte",
+                "label": "Investido por UC",
+                "value": formatar_reais(kpis["indicador_coorte"]),
+                "icon": ":material/analytics:",
+                "color": "orange",
+                "help": (
+                    "Total realizado da coorte dividido pelo total de UCs v\u00e1lidas. "
+                    "N\u00e3o \u00e9 a m\u00e9dia simples dos indicadores individuais."
                 ),
-                border=False,
-            )
-            st.caption("Coorte fixa de dez distribuidoras")
-
-        with st.container(border=True):
-            st.badge("Indicador agregado da coorte", color="orange", icon=":material/analytics:")
-            st.metric(
-                "Investido por UC",
-                formatar_reais(kpis["indicador_coorte"]),
-                border=False,
-                help=(
-                    "Total realizado da coorte dividido pelo total de UCs válidas. "
-                    "Não é a média simples dos indicadores individuais."
+                "caption": (
+                    f"{kpis['indicadores_disponiveis']} de 10 valores individuais "
+                    "dispon\u00edveis"
                 ),
-            )
-            st.caption(
-                f"{kpis['indicadores_disponiveis']} de 10 valores individuais disponíveis"
-            )
+            },
+        ],
+        chave="investimento-uc",
+        colunas_desktop=4,
+    )
 
     if kpis["divergencias"]:
         st.warning(
@@ -292,6 +290,7 @@ def _renderizar_ranking(linhas: list[dict[str, Any]], ano: int) -> None:
         alt.layer(barras, rotulos).properties(height=460),
         width="stretch",
         alt=f"Ranking das dez distribuidoras por investimento por UC em {ano}",
+        key="gridinvest-chart-investimento-uc-ranking",
     )
 
 
@@ -308,9 +307,7 @@ def _renderizar_dispersao(linhas: list[dict[str, Any]], ano: int) -> None:
             "ano": linha["ano"],
             "qtd_uc": linha["qtd_uc"],
             "valor": float(linha["valor"]),
-            "total_bilhoes": float(
-                linha["total_realizado"] / Decimal(1_000_000_000)
-            ),
+            "total_bilhoes": float(linha["total_realizado"] / Decimal(1_000_000_000)),
             "total_rotulo": formatar_reais(linha["total_realizado"]),
             "valor_rotulo": linha["valor_exibido"],
             "destaque": linha["destaque"],
@@ -371,6 +368,7 @@ def _renderizar_dispersao(linhas: list[dict[str, Any]], ano: int) -> None:
         grafico,
         width="stretch",
         alt=f"Relação entre UCs, investimento total e investimento por UC em {ano}",
+        key="gridinvest-chart-investimento-uc-dispersao",
     )
 
 
@@ -393,9 +391,8 @@ def _renderizar_tabela(linhas: list[dict[str, Any]], ano: int) -> None:
             "Posição R$/UC": (
                 f"#{linha['posicao_uc']}" if linha["posicao_uc"] is not None else "—"
             ),
-            "Distribuidora": (
-                f"![{escape(linha['rótulo'])}]({imagem_distribuidora(linha['cnpj'], linha['rótulo'], linha['uf'])})"
-            ),
+            "Logo": imagem_distribuidora(linha["cnpj"], linha["rótulo"], linha["uf"]),
+            "Distribuidora": linha["rótulo"],
             "UCs ativas": (
                 f"{linha['qtd_uc']:,}".replace(",", ".")
                 if linha["qtd_uc"] is not None
@@ -414,23 +411,31 @@ def _renderizar_tabela(linhas: list[dict[str, Any]], ano: int) -> None:
         for linha in ordenadas
     ]
     df = pd.DataFrame(dados_tabela)
-    larguras = ("100px", "225px", "125px", "190px", "190px", "150px")
-    estilos = [
-        {
-            "selector": f"th.col{indice}, td.col{indice}",
-            "props": [
-                ("width", largura),
-                ("min-width", largura),
-                ("max-width", largura),
-                ("padding", "5px 8px"),
-                ("text-align", "left" if indice == 1 else "right"),
-            ],
-        }
-        for indice, largura in enumerate(larguras)
-    ]
-    st.table(
-        df.style.set_table_styles(estilos),
+    st.dataframe(
+        df,
+        column_config={
+            "Posição R$/UC": st.column_config.TextColumn(
+                "Posição R$/UC", width="small"
+            ),
+            "Logo": st.column_config.ImageColumn("Logo", width="small"),
+            "Distribuidora": st.column_config.TextColumn(
+                "Distribuidora", width="medium"
+            ),
+            "UCs ativas": st.column_config.TextColumn("UCs ativas", width="small"),
+            "Investimento realizado": st.column_config.TextColumn(
+                "Investimento realizado", width="medium"
+            ),
+            "Investimento realizado por UC": st.column_config.TextColumn(
+                "Investimento realizado por UC", width="medium"
+            ),
+            "Posição financeira": st.column_config.TextColumn(
+                "Posição financeira", width="small"
+            ),
+        },
         hide_index=True,
-        width=980,
+        width="stretch",
+        height=420,
+        row_height=42,
         alt=f"Comparação das dez distribuidoras por R$/UC em {ano}",
+        key="gridinvest-table-investimento-uc",
     )
