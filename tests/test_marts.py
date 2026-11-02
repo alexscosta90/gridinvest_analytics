@@ -24,7 +24,13 @@ OUTRO_CNPJ = "99999999000199"
 
 def linhas_indger_dezembro():
     return [
-        (cnpj, f"{posicao:07d}", date(2025, 12, 1), 50000 - posicao * 1000)
+        (
+            cnpj,
+            f"{posicao:07d}",
+            date(2025, 12, 1),
+            50000 - posicao * 1000,
+            "valid",
+        )
         for posicao, cnpj in enumerate(COORTE_CNPJS, start=1)
     ]
 
@@ -45,9 +51,10 @@ def preparar_banco(caminho, linhas_pdd, linhas_indger=None):
         )
         """
     )
+    con.execute("ALTER TABLE refined.pdd ADD COLUMN SigAgente VARCHAR")
     con.executemany(
-        "INSERT INTO refined.pdd VALUES (?, ?, ?, ?, ?, ?, ?)",
-        linhas_pdd,
+        "INSERT INTO refined.pdd VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [(*linha, f"Agente {linha[0]}") for linha in linhas_pdd],
     )
     con.execute(
         """
@@ -55,13 +62,16 @@ def preparar_banco(caminho, linhas_pdd, linhas_indger=None):
             NumCNPJ VARCHAR,
             CodMunicipioIBGE VARCHAR,
             DatReferenciaInformada DATE,
-            QtdUCAtiva BIGINT
+            QtdUCAtiva BIGINT,
+            QtdUCAtiva_status VARCHAR
         )
         """
     )
+    con.execute("ALTER TABLE refined.indger_comerciais ADD COLUMN NomAgente VARCHAR")
+    linhas_indger = linhas_indger if linhas_indger is not None else linhas_indger_dezembro()
     con.executemany(
-        "INSERT INTO refined.indger_comerciais VALUES (?, ?, ?, ?)",
-        linhas_indger if linhas_indger is not None else linhas_indger_dezembro(),
+        "INSERT INTO refined.indger_comerciais VALUES (?, ?, ?, ?, ?, ?)",
+        [(*linha, f"Distribuidora {linha[0]}") for linha in linhas_indger],
     )
     con.close()
 
@@ -99,6 +109,46 @@ def linhas_mart02():
         (TOP10_CNPJ, 2025, "", Decimal("2.00"), "valid", Decimal("1.00"), "valid"),
         (OUTRO_CNPJ, 2025, None, None, "invalid", None, "null"),
     ]
+
+
+def linhas_mart03():
+    return [
+        (TOP10_CNPJ, 2023, "Expansão", Decimal("0.50"), "valid", Decimal("0.50"), "valid"),
+        (TOP10_CNPJ, 2023, "Expansão", Decimal("0.50"), "valid", Decimal("0.50"), "valid"),
+        (COORTE_CNPJS[1], 2023, "Melhoria", Decimal("2.00"), "valid", Decimal("6.00"), "valid"),
+        (COORTE_CNPJS[2], 2023, "Renovação", Decimal("3.00"), "valid", Decimal("1.00"), "valid"),
+        (OUTRO_CNPJ, 2023, "Expansão", Decimal("7.00"), "valid", Decimal("4.00"), "valid"),
+        (OUTRO_CNPJ, 2023, None, None, "invalid", None, "invalid"),
+        (TOP10_CNPJ, 2024, "Expansão", Decimal("5.00"), "valid", Decimal("2.00"), "valid"),
+        (OUTRO_CNPJ, 2024, "Melhoria", Decimal("3.00"), "valid", Decimal("1.00"), "valid"),
+        (TOP10_CNPJ, 2025, "Renovação", Decimal("3.00"), "valid", Decimal("1.00"), "valid"),
+    ]
+
+
+def linhas_indger_mart03():
+    linhas = [
+        (
+            cnpj,
+            f"{posicao:07d}",
+            date(2025, 12, 1),
+            100 - posicao,
+            "valid",
+        )
+        for posicao, cnpj in enumerate(COORTE_CNPJS, start=1)
+    ]
+    linhas[0] = (TOP10_CNPJ, "0000001", date(2025, 12, 1), 100, "valid")
+    linhas.extend(
+        [
+            (TOP10_CNPJ, "1000001", date(2023, 12, 1), 1, "valid"),
+            (TOP10_CNPJ, "1000002", date(2023, 12, 1), 2, "valid"),
+            (TOP10_CNPJ, "1000001", date(2023, 11, 1), 1000, "valid"),
+            (COORTE_CNPJS[1], "2000001", date(2023, 12, 1), 0, "valid"),
+            (COORTE_CNPJS[2], "3000001", date(2023, 12, 1), None, "null"),
+            (TOP10_CNPJ, "1000001", date(2024, 12, 1), 2, "valid"),
+            (OUTRO_CNPJ, "9000001", date(2023, 11, 1), 500, "valid"),
+        ]
+    )
+    return linhas
 
 
 def test_mart01_agrega_por_ano_e_escopo_sem_perder_o_nacional(
@@ -261,7 +311,8 @@ def test_coorte_permanece_inalterada_apos_atualizacao_do_indger(
         con.execute(
             """
             INSERT INTO refined.indger_comerciais
-            VALUES ('99988888000199', '9999999', DATE '2025-12-01', 99999999)
+            VALUES ('99988888000199', '9999999', DATE '2025-12-01', 99999999,
+                    'valid', 'Nova distribuidora')
             """
         )
 
@@ -538,4 +589,193 @@ def test_mart02_bloqueia_coorte_com_duplicidade_municipal(tmp_path, monkeypatch)
 
     with pytest.raises(ValueError, match="chave municipal duplicada"):
         marts.executar_mart_02()
+
+
+def test_mart03_calcula_por_cnpj_ano_com_uc_de_dezembro(tmp_path, monkeypatch):
+    banco = tmp_path / "mart03_test.duckdb"
+    preparar_banco(banco, linhas_mart03(), linhas_indger_mart03())
+    conectar_teste(banco, monkeypatch)
+
+    assert marts.executar_mart_01() == {"linhas": 6}
+    assert marts.executar_mart_02() == {"linhas": 12}
+    resultado = marts.executar_mart_03()
+
+    assert resultado == {
+        "linhas": 12,
+        "planejado_por_uc_indisponivel": 6,
+        "realizado_por_uc_indisponivel": 6,
+    }
+    with duckdb.connect(str(banco)) as con:
+        linhas = con.execute(
+            """
+            SELECT ano_referencia, escopo, cnpj, qtd_registros_pdd,
+                   total_planejado, qtd_planejados_invalidos,
+                   status_total_planejado, total_realizado,
+                   qtd_realizados_invalidos, status_total_realizado,
+                   qtd_municipios_dezembro, qtd_uc_dezembro,
+                   status_cobertura, investimento_planejado_por_uc,
+                   status_planejado_por_uc, investimento_realizado_por_uc,
+                   status_realizado_por_uc
+            FROM marts.investimento_por_uc
+            WHERE escopo = 'nacional'
+            ORDER BY ano_referencia, cnpj
+            """
+        ).fetchall()
+        tipos = dict(
+            con.execute(
+                """
+                SELECT column_name, data_type
+                FROM information_schema.columns
+                WHERE table_schema = 'marts'
+                  AND table_name = 'investimento_por_uc'
+                """
+            ).fetchall()
+        )
+        duplicadas = con.execute(
+            """
+            SELECT COUNT(*) FROM (
+                SELECT ano_referencia, escopo, cnpj
+                FROM marts.investimento_por_uc
+                GROUP BY ano_referencia, escopo, cnpj
+                HAVING COUNT(*) > 1
+            )
+            """
+        ).fetchone()[0]
+
+    assert duplicadas == 0
+    assert tipos["cnpj"] == "VARCHAR"
+    assert tipos["total_planejado"].startswith("DECIMAL")
+    assert tipos["total_realizado"].startswith("DECIMAL")
+    assert tipos["investimento_planejado_por_uc"] == "DECIMAL(18,2)"
+    assert tipos["investimento_realizado_por_uc"] == "DECIMAL(18,2)"
+
+    top1_2023 = next(
+        linha for linha in linhas if linha[0:3] == (2023, "nacional", TOP10_CNPJ)
+    )
+    assert top1_2023[3] == 2
+    assert top1_2023[4:6] == (Decimal("1.00"), 0)
+    assert top1_2023[7:9] == (Decimal("1.00"), 0)
+    assert top1_2023[10:14] == (
+        2,
+        3,
+        "valid",
+        Decimal("0.33"),
+    )
+    assert top1_2023[15] == Decimal("0.33")
+
+    top2_2023 = next(
+        linha
+        for linha in linhas
+        if linha[0:3] == (2023, "nacional", COORTE_CNPJS[1])
+    )
+    assert top2_2023[11:17] == (
+        0,
+        "zero",
+        None,
+        "denominador_zero",
+        None,
+        "denominador_zero",
+    )
+    top3_2023 = next(
+        linha
+        for linha in linhas
+        if linha[0:3] == (2023, "nacional", COORTE_CNPJS[2])
+    )
+    assert top3_2023[11:14] == (None, "null", None)
+
+    sem_dezembro = next(
+        linha for linha in linhas if linha[0:3] == (2023, "nacional", OUTRO_CNPJ)
+    )
+    assert sem_dezembro[10:14] == (None, None, "sem_referencia", None)
+    assert sem_dezembro[15] is None
+    assert sem_dezembro[5] == 1
+    assert sem_dezembro[8] == 1
+
+
+def test_mart03_idempotente(tmp_path, monkeypatch):
+    banco = tmp_path / "mart03_idempotente.duckdb"
+    preparar_banco(banco, linhas_mart03(), linhas_indger_mart03())
+    conectar_teste(banco, monkeypatch)
+
+    marts.executar_mart_03()
+    with duckdb.connect(str(banco)) as con:
+        primeira = con.execute(
+            "SELECT * FROM marts.investimento_por_uc "
+            "ORDER BY ano_referencia, escopo, cnpj"
+        ).fetchall()
+    marts.executar_mart_03()
+    with duckdb.connect(str(banco)) as con:
+        segunda = con.execute(
+            "SELECT * FROM marts.investimento_por_uc ORDER BY ano_referencia, escopo, cnpj"
+        ).fetchall()
+
+    assert segunda == primeira
+    assert len(segunda) == 12
+
+
+def test_mart03_duplicidade_municipal_bloqueia_e_preserva_resultado(
+    tmp_path, monkeypatch
+):
+    banco = tmp_path / "mart03_duplicidade.duckdb"
+    preparar_banco(banco, linhas_mart03(), linhas_indger_mart03())
+    conectar_teste(banco, monkeypatch)
+    marts.executar_mart_03()
+
+    with duckdb.connect(str(banco)) as con:
+        anterior = con.execute(
+            "SELECT * FROM marts.investimento_por_uc "
+            "ORDER BY ano_referencia, escopo, cnpj"
+        ).fetchall()
+        con.execute(
+            """
+            INSERT INTO refined.indger_comerciais
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [TOP10_CNPJ, "1000001", date(2024, 12, 1), 15, "valid", "Cemig"],
+        )
+
+    with pytest.raises(ValueError, match="Agregação de UCs bloqueada"):
+        marts.executar_mart_03()
+
+    with duckdb.connect(str(banco)) as con:
+        atual = con.execute(
+            "SELECT * FROM marts.investimento_por_uc "
+            "ORDER BY ano_referencia, escopo, cnpj"
+        ).fetchall()
+    assert atual == anterior
+
+
+def test_mart03_falha_apos_sql_reverte_tabela_e_coorte(tmp_path, monkeypatch):
+    banco = tmp_path / "mart03_rollback.duckdb"
+    preparar_banco(banco, linhas_mart03(), linhas_indger_mart03())
+    with duckdb.connect(str(banco)) as con:
+        con.execute("CREATE SCHEMA marts")
+        con.execute(
+            "CREATE TABLE marts.investimento_por_uc "
+            "AS SELECT 'anterior' AS marcador"
+        )
+    conectar_teste(banco, monkeypatch)
+
+    def falhar_apos_sql(con):
+        raise ValueError("falha simulada após materializar MART 03")
+
+    with pytest.raises(ValueError, match="falha simulada após materializar"):
+        marts.executar_sql_mart(
+            marts.MART_03_SQL,
+            falhar_apos_sql,
+            validacao_previa=marts._validar_chaves_uc_mart_03,
+        )
+
+    with duckdb.connect(str(banco)) as con:
+        anterior = con.execute(
+            "SELECT marcador FROM marts.investimento_por_uc"
+        ).fetchall()
+        coorte = con.execute(
+            """
+            SELECT COUNT(*) FROM information_schema.tables
+            WHERE table_schema = 'marts' AND table_name = 'cohorte_top10_2025'
+            """
+        ).fetchone()[0]
+    assert anterior == [("anterior",)]
+    assert coorte == 0
 
