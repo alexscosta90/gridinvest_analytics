@@ -194,6 +194,52 @@ def linhas_mart06():
     return linhas
 
 
+def linhas_indger_mart07():
+    linhas = []
+    for ano in (2023, 2024, 2025):
+        for indice, cnpj in enumerate(COORTE_CNPJS):
+            if indice == 0:
+                total_uc = {2023: 0, 2024: 100, 2025: 120}[ano]
+            elif ano == 2024 and indice in (1, 2):
+                total_uc = 925
+            else:
+                total_uc = 1000 - indice * 50 + (ano - 2023) * 10
+            primeira_parcela = total_uc // 2
+            for municipio, quantidade in enumerate(
+                (primeira_parcela, total_uc - primeira_parcela)
+            ):
+                linhas.append(
+                    (
+                        cnpj,
+                        f"{ano}{indice:02d}{municipio:02d}",
+                        date(ano, 12, 1),
+                        quantidade,
+                        "valid",
+                    )
+                )
+    for ano, total_uc in ((2023, 2000), (2024, 1100), (2025, 50)):
+        linhas.append(
+            (OUTRO_CNPJ, f"{ano}9999", date(ano, 12, 1), total_uc, "valid")
+        )
+    return linhas
+
+
+def linhas_pdd_mart07():
+    return [
+        (
+            cnpj,
+            ano,
+            "Expansão",
+            Decimal(1000 + indice),
+            "valid",
+            Decimal(500 + indice),
+            "valid",
+        )
+        for ano in (2023, 2024, 2025)
+        for indice, cnpj in enumerate(COORTE_CNPJS)
+    ]
+
+
 def linhas_indger_mart03():
     linhas = [
         (
@@ -1493,4 +1539,281 @@ def test_mart06_rollback_preserva_tabela_anterior(tmp_path, monkeypatch):
             "SELECT marcador FROM marts.ranking_investimentos"
         ).fetchall()
     assert anterior == [("anterior",)]
+
+
+def test_mart07_top10_nacional_ranking_variacoes_e_regressao(
+    tmp_path, monkeypatch
+):
+    banco = tmp_path / "mart07_test.duckdb"
+    preparar_banco(banco, linhas_pdd_mart07(), linhas_indger_mart07())
+    conectar_teste(banco, monkeypatch)
+
+    marts.executar_mart_01()
+    marts.executar_mart_02()
+    marts.executar_mart_03()
+    marts.executar_mart_04()
+    marts.executar_mart_05()
+    marts.executar_mart_06()
+    resultado = marts.executar_mart_07()
+    assert resultado == {"linhas_top10": 30, "linhas_nacionais": 33}
+
+    with duckdb.connect(str(banco)) as con:
+        top10 = con.execute(
+            """
+            SELECT ano_referencia, cnpj, qtd_uc_dezembro, status_cobertura,
+                   posicao_anual, posicao_coorte_2025, ano_anterior,
+                   qtd_uc_ano_anterior, variacao_absoluta_uc,
+                   status_variacao_absoluta, variacao_percentual_uc,
+                   status_variacao_percentual
+            FROM marts.ranking_por_uc_top10
+            ORDER BY ano_referencia, posicao_anual NULLS LAST, cnpj
+            """
+        ).fetchall()
+        nacional = con.execute(
+            """
+            SELECT ano_referencia, cnpj, qtd_uc_dezembro, posicao_nacional,
+                   posicao_coorte_2025, top10_2025
+            FROM marts.ranking_por_uc_nacional
+            ORDER BY ano_referencia, posicao_nacional NULLS LAST, cnpj
+            """
+        ).fetchall()
+        duplicadas = con.execute(
+            """
+            SELECT COUNT(*) FROM (
+                SELECT ano_referencia, cnpj
+                FROM marts.ranking_por_uc_top10
+                GROUP BY ano_referencia, cnpj HAVING COUNT(*) > 1
+            )
+            """
+        ).fetchone()[0]
+        coorte = con.execute(
+            "SELECT posicao, cnpj, uc_dez_2025 "
+            "FROM marts.cohorte_top10_2025 ORDER BY posicao"
+        ).fetchall()
+        tipos = {
+            (tabela, coluna): tipo
+            for tabela, coluna, tipo in con.execute(
+                """
+                SELECT table_name, column_name, data_type
+                FROM information_schema.columns
+                WHERE table_schema = 'marts'
+                  AND table_name IN ('ranking_por_uc_top10', 'ranking_por_uc_nacional')
+                """
+            ).fetchall()
+        }
+
+    assert len(top10) == 30
+    assert all(
+        sum(row[0] == ano for row in top10) == 10
+        for ano in (2023, 2024, 2025)
+    )
+    assert [row[0] for row in coorte] == list(range(1, 11))
+    assert {row[1] for row in top10} == {row[1] for row in coorte}
+    assert all(row[1] in {member[1] for member in coorte} for row in top10)
+    assert all(
+        {row[4] for row in top10 if row[0] == ano} == set(range(1, 11))
+        for ano in (2023, 2024, 2025)
+    )
+    assert duplicadas == 0
+    assert len(nacional) == 33
+    assert any(row[1] == OUTRO_CNPJ and row[5] is False for row in nacional)
+    # Em 2023/24 o outsider lidera o nacional, mas está ausente do top10 fixo.
+    assert next(row for row in nacional if row[0:2] == (2023, OUTRO_CNPJ))[3] == 1
+    assert next(row for row in nacional if row[0:2] == (2024, OUTRO_CNPJ))[3] == 1
+    assert next(
+        row for row in top10 if row[0:2] == (2024, COORTE_CNPJS[2])
+    )[4] == 1
+    assert next(
+        row for row in top10 if row[0:2] == (2024, COORTE_CNPJS[1])
+    )[4] == 2
+
+    cnpj_top10 = COORTE_CNPJS[0]
+    posicao_fixa, uc_dez25 = next(
+        (posicao, quantidade)
+        for posicao, cnpj, quantidade in coorte
+        if cnpj == cnpj_top10
+    )
+    linha_2025 = next(row for row in top10 if row[0:2] == (2025, cnpj_top10))
+    assert linha_2025[2] == uc_dez25
+    assert linha_2025[5] == posicao_fixa
+    assert linha_2025[8:12] == (
+        20,
+        "valid",
+        Decimal("20.00"),
+        "valid",
+    )
+    linha_2024_zero_base = next(
+        row for row in top10 if row[0:2] == (2024, cnpj_top10)
+    )
+    assert linha_2024_zero_base[8:12] == (
+        100,
+        "valid",
+        None,
+        "base_zero",
+    )
+    assert tipos[("ranking_por_uc_top10", "cnpj")] == "VARCHAR"
+    assert tipos[("ranking_por_uc_top10", "qtd_uc_dezembro")] == "BIGINT"
+    assert tipos[("ranking_por_uc_nacional", "qtd_uc_dezembro")] == "BIGINT"
+
+
+def test_mart07_preserva_status_de_uc_e_referencias_ausentes(
+    tmp_path, monkeypatch
+):
+    linhas_indger = linhas_indger_mart07()
+    ajustadas = []
+    for linha in linhas_indger:
+        cnpj, municipio, referencia, quantidade, status = linha
+        ano = referencia.year
+        if cnpj == COORTE_CNPJS[2] and ano == 2024:
+            continue
+        if cnpj == COORTE_CNPJS[1] and ano == 2024 and municipio.endswith("00"):
+            quantidade, status = None, "null"
+        if cnpj == COORTE_CNPJS[3] and ano == 2023 and municipio.endswith("00"):
+            quantidade, status = None, "invalid"
+        if cnpj == COORTE_CNPJS[4] and ano == 2023:
+            quantidade, status = None, "null"
+        ajustadas.append((cnpj, municipio, referencia, quantidade, status))
+
+    banco = tmp_path / "mart07_status.duckdb"
+    preparar_banco(banco, linhas_pdd_mart07(), ajustadas)
+    conectar_teste(banco, monkeypatch)
+    resultado = marts.executar_mart_07()
+    assert resultado["linhas_top10"] == 30
+
+    with duckdb.connect(str(banco)) as con:
+        linhas = con.execute(
+            """
+            SELECT ano_referencia, cnpj, qtd_municipios_dezembro,
+                   qtd_uc_validas, qtd_uc_nulas, qtd_uc_invalidas,
+                   qtd_uc_dezembro, status_cobertura, posicao_anual,
+                   variacao_absoluta_uc, status_variacao_absoluta,
+                   variacao_percentual_uc, status_variacao_percentual
+            FROM marts.ranking_por_uc_top10
+            """
+        ).fetchall()
+
+    def buscar(ano, cnpj):
+        return next(row for row in linhas if row[0:2] == (ano, cnpj))
+
+    sem_referencia = buscar(2024, COORTE_CNPJS[2])
+    assert sem_referencia[2:9] == (0, 0, 0, 0, None, "sem_referencia", None)
+    variacao_base_ausente = buscar(2025, COORTE_CNPJS[2])
+    assert variacao_base_ausente[10] == "uc_anterior_sem_referencia"
+    assert variacao_base_ausente[9] is None
+
+    parcial = buscar(2024, COORTE_CNPJS[1])
+    assert parcial[3:9] == (1, 1, 0, None, "partial", None)
+    assert buscar(2025, COORTE_CNPJS[1])[10] == "uc_anterior_partial"
+
+    invalido = buscar(2023, COORTE_CNPJS[3])
+    assert invalido[4:9] == (0, 1, None, "invalid", None)
+    nulo = buscar(2023, COORTE_CNPJS[4])
+    assert nulo[3:9] == (0, 2, 0, None, "null", None)
+    zero = buscar(2023, COORTE_CNPJS[0])
+    assert zero[6:9] == (0, "zero", 8)
+
+
+def test_mart07_bloqueia_coorte_incompleta_e_duplicidades(
+    tmp_path, monkeypatch
+):
+    banco = tmp_path / "mart07_coorte_incompleta.duckdb"
+    linhas_indger = linhas_indger_mart07()
+    preparar_banco(banco, linhas_pdd_mart07(), linhas_indger)
+    conectar_teste(banco, monkeypatch)
+    marts.executar_mart_07()
+
+    with duckdb.connect(str(banco)) as con:
+        con.execute(
+            """
+            DELETE FROM marts.ranking_por_uc_top10
+            WHERE ano_referencia = 2024 AND cnpj = ?
+            """,
+            [COORTE_CNPJS[0]],
+        )
+        with pytest.raises(ValueError, match="Saída principal.*incompleta.*faltantes"):
+            marts._validar_mart_07(con)
+
+    marts.executar_mart_07()
+    with duckdb.connect(str(banco)) as con:
+        con.execute(
+            """
+            INSERT INTO marts.ranking_por_uc_top10
+            SELECT * FROM marts.ranking_por_uc_top10
+            WHERE ano_referencia = 2024 AND cnpj = ?
+            """,
+            [COORTE_CNPJS[0]],
+        )
+        with pytest.raises(ValueError, match="CNPJ/ano duplicada"):
+            marts._validar_mart_07(con)
+
+    marts.executar_mart_07()
+    duplicada = linhas_indger[0]
+    linhas_indger.append(duplicada)
+    with duckdb.connect(str(banco)) as con:
+        con.execute(
+            """
+            INSERT INTO refined.indger_comerciais
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (*duplicada, f"Distribuidora {duplicada[0]}"),
+        )
+    with pytest.raises(ValueError, match="chave CNPJ.*município.*dezembro duplicada"):
+        marts.executar_mart_07()
+
+
+def test_mart07_idempotente_e_rollback(tmp_path, monkeypatch):
+    banco = tmp_path / "mart07_idempotencia_rollback.duckdb"
+    preparar_banco(banco, linhas_pdd_mart07(), linhas_indger_mart07())
+    conectar_teste(banco, monkeypatch)
+    marts.executar_mart_07()
+    with duckdb.connect(str(banco)) as con:
+        primeira_top10 = con.execute(
+            "SELECT * FROM marts.ranking_por_uc_top10 "
+            "ORDER BY ano_referencia, cnpj"
+        ).fetchall()
+        primeira_nacional = con.execute(
+            "SELECT * FROM marts.ranking_por_uc_nacional "
+            "ORDER BY ano_referencia, cnpj"
+        ).fetchall()
+    marts.executar_mart_07()
+    with duckdb.connect(str(banco)) as con:
+        segunda_top10 = con.execute(
+            "SELECT * FROM marts.ranking_por_uc_top10 "
+            "ORDER BY ano_referencia, cnpj"
+        ).fetchall()
+        segunda_nacional = con.execute(
+            "SELECT * FROM marts.ranking_por_uc_nacional "
+            "ORDER BY ano_referencia, cnpj"
+        ).fetchall()
+        con.execute(
+            "CREATE OR REPLACE TABLE marts.ranking_por_uc_top10 "
+            "AS SELECT 'anterior_top10' AS marcador"
+        )
+        con.execute(
+            "CREATE OR REPLACE TABLE marts.ranking_por_uc_nacional "
+            "AS SELECT 'anterior_nacional' AS marcador"
+        )
+
+    assert segunda_top10 == primeira_top10
+    assert segunda_nacional == primeira_nacional
+
+    def falhar_apos_sql(con):
+        raise ValueError("falha simulada após materializar MART 07")
+
+    with pytest.raises(ValueError, match="falha simulada após materializar"):
+        marts.executar_sql_mart(
+            marts.MART_07_SQL,
+            falhar_apos_sql,
+            validacao_previa=marts._validar_chaves_uc_mart_07,
+        )
+
+    with duckdb.connect(str(banco)) as con:
+        top10_anterior = con.execute(
+            "SELECT marcador FROM marts.ranking_por_uc_top10"
+        ).fetchall()
+        nacional_anterior = con.execute(
+            "SELECT marcador FROM marts.ranking_por_uc_nacional"
+        ).fetchall()
+    assert top10_anterior == [("anterior_top10",)]
+    assert nacional_anterior == [("anterior_nacional",)]
 
