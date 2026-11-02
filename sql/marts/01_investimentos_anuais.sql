@@ -1,18 +1,5 @@
 CREATE OR REPLACE TABLE marts.investimentos_anuais AS
-WITH top10_fixo (cnpj) AS (
-    VALUES
-        ('06981180000116'),
-        ('61695227000193'),
-        ('15139629000194'),
-        ('04368898000106'),
-        ('33050196000188'),
-        ('60444437000146'),
-        ('07047251000170'),
-        ('10835932000108'),
-        ('08336783000190'),
-        ('01543032000104')
-),
-pdd_cnpj_ano AS (
+WITH pdd_cnpj_ano AS (
     SELECT
         NumCPFCNPJ AS cnpj,
         AnoReferencia AS ano_referencia,
@@ -72,7 +59,7 @@ por_escopo AS (
         SUM(p.qtd_realizados_nulos) AS qtd_realizados_nulos,
         SUM(p.qtd_realizados_invalidos) AS qtd_realizados_invalidos
     FROM pdd_cnpj_ano AS p
-    INNER JOIN top10_fixo AS t
+    INNER JOIN marts.cohorte_top10_2025 AS t
         ON p.cnpj = t.cnpj
     GROUP BY p.ano_referencia
 )
