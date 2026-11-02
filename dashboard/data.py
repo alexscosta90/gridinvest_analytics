@@ -163,6 +163,58 @@ def ler_dados_visao_geral(
             """,
             list(TIPOS_INVESTIMENTO_EXIBIDOS),
         ).fetchall()
+        tipos_completos = con.execute(
+            """
+            SELECT
+                ano_referencia,
+                cnpj,
+                MAX(NULLIF(TRIM(rotulo_pdd), '')) AS nome,
+                COALESCE(NULLIF(TRIM(tipo_obra), ''), '(tipo vazio/nulo)') AS tipo,
+                CASE
+                    WHEN SUM(qtd_realizados_invalidos) > 0 THEN 'partial_invalid'
+                    WHEN SUM(qtd_realizados_nulos) > 0 THEN 'partial_null'
+                    WHEN SUM(qtd_realizados_validos) = 0 THEN 'unavailable'
+                    ELSE 'valid'
+                END AS status_realizado,
+                CASE
+                    WHEN SUM(qtd_realizados_validos) = 0 THEN NULL
+                    ELSE SUM(total_realizado)
+                END AS realizado,
+                SUM(qtd_realizados_validos) AS qtd_validos,
+                SUM(qtd_realizados_nulos) AS qtd_nulos,
+                SUM(qtd_realizados_invalidos) AS qtd_invalidos
+            FROM marts.perfil_investimentos
+            WHERE escopo = 'top10'
+              AND ano_referencia BETWEEN 2023 AND 2025
+            GROUP BY ano_referencia, cnpj,
+                     COALESCE(NULLIF(TRIM(tipo_obra), ''), '(tipo vazio/nulo)')
+            ORDER BY ano_referencia, cnpj, tipo
+            """
+        ).fetchall()
+        totais_perfil = con.execute(
+            """
+            SELECT
+                ano_referencia,
+                cnpj,
+                CASE
+                    WHEN SUM(qtd_realizados_invalidos) > 0 THEN 'partial_invalid'
+                    WHEN SUM(qtd_realizados_nulos) > 0 THEN 'partial_null'
+                    WHEN SUM(qtd_realizados_validos) = 0 THEN 'unavailable'
+                    ELSE 'valid'
+                END AS status_realizado,
+                CASE
+                    WHEN SUM(qtd_realizados_invalidos) > 0
+                      OR SUM(qtd_realizados_nulos) > 0
+                      OR SUM(qtd_realizados_validos) = 0 THEN NULL
+                    ELSE SUM(total_realizado)
+                END AS realizado
+            FROM marts.perfil_investimentos
+            WHERE escopo = 'top10'
+              AND ano_referencia BETWEEN 2023 AND 2025
+            GROUP BY ano_referencia, cnpj
+            ORDER BY ano_referencia, cnpj
+            """
+        ).fetchall()
         categorias_adicionais = con.execute(
             """
             SELECT DISTINCT
@@ -186,7 +238,11 @@ def ler_dados_visao_geral(
                 total_realizado,
                 status_total_realizado,
                 percentual_execucao,
-                status_percentual_execucao
+                status_percentual_execucao,
+                diferenca_absoluta,
+                status_diferenca,
+                diferenca_percentual,
+                status_diferenca_percentual
             FROM marts.planejado_vs_realizado_distribuidora
             WHERE top10_2025 = TRUE
               AND ano_referencia BETWEEN 2023 AND 2025
@@ -211,7 +267,11 @@ def ler_dados_visao_geral(
                 cnpj,
                 ano_referencia,
                 investimento_realizado_por_uc,
-                status_realizado_por_uc
+                status_realizado_por_uc,
+                total_realizado,
+                status_total_realizado,
+                qtd_uc_dezembro,
+                status_cobertura
             FROM marts.investimento_por_uc
             WHERE escopo = 'top10'
               AND ano_referencia BETWEEN 2023 AND 2025
@@ -324,6 +384,34 @@ def ler_dados_visao_geral(
             qtd_invalidos,
         ) in tipos
     ]
+    linhas_tipos_completos = [
+        {
+            "ano": ano,
+            "cnpj": cnpj,
+            "nome": nome,
+            "tipo": tipo,
+            "status_realizado": status,
+            "realizado": total,
+            "qtd_validos": qtd_validos,
+            "qtd_nulos": qtd_nulos,
+            "qtd_invalidos": qtd_invalidos,
+        }
+        for (
+            ano,
+            cnpj,
+            nome,
+            tipo,
+            status,
+            total,
+            qtd_validos,
+            qtd_nulos,
+            qtd_invalidos,
+        ) in tipos_completos
+    ]
+    totais_perfil_linhas = [
+        {"ano": ano, "cnpj": cnpj, "status": status, "realizado": total}
+        for ano, cnpj, status, total in totais_perfil
+    ]
     financeiros = [
         {
             "cnpj": cnpj,
@@ -334,6 +422,10 @@ def ler_dados_visao_geral(
             "status_realizado": status_realizado,
             "taxa_execucao": taxa,
             "status_taxa_execucao": status_taxa,
+            "diferenca_absoluta": diferenca_absoluta,
+            "status_diferenca": status_diferenca,
+            "diferenca_percentual": diferenca_percentual,
+            "status_diferenca_percentual": status_diferenca_percentual,
         }
         for (
             cnpj,
@@ -344,6 +436,10 @@ def ler_dados_visao_geral(
             status_realizado,
             taxa,
             status_taxa,
+            diferenca_absoluta,
+            status_diferenca,
+            diferenca_percentual,
+            status_diferenca_percentual,
         ) in detalhes_financeiros
     ]
     unidades = [
@@ -361,8 +457,21 @@ def ler_dados_visao_geral(
             "ano": ano,
             "valor": valor,
             "status": status,
+            "total_realizado": total_realizado,
+            "status_total_realizado": status_total_realizado,
+            "qtd_uc_dezembro": qtd_uc_dezembro,
+            "status_cobertura": status_cobertura,
         }
-        for cnpj, ano, valor, status in valores_por_uc
+        for (
+            cnpj,
+            ano,
+            valor,
+            status,
+            total_realizado,
+            status_total_realizado,
+            qtd_uc_dezembro,
+            status_cobertura,
+        ) in valores_por_uc
     ]
     return {
         "historico": historico,
@@ -370,6 +479,8 @@ def ler_dados_visao_geral(
         "coorte": coorte,
         "ranking": linhas_ranking,
         "tipos": linhas_tipos,
+        "tipos_completos": linhas_tipos_completos,
+        "totais_perfil": totais_perfil_linhas,
         "categorias_adicionais": [linha[0] for linha in categorias_adicionais],
         "detalhes_financeiros": financeiros,
         "unidades_consumidoras": unidades,

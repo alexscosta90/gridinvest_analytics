@@ -28,11 +28,15 @@ def preparar_ranking_investimento_uc(dados: dict, ano: int) -> list[dict]:
     if len(cnpjs_uc) != len(set(cnpjs_uc)):
         raise ValueError(f"O MART 03 contém CNPJs duplicados em {ano}.")
     uc_por_cnpj = {linha["cnpj"]: linha for linha in linhas_uc}
-    unidades_por_cnpj = {
-        linha["cnpj"]: linha
+    linhas_unidades = [
+        linha
         for linha in dados["unidades_consumidoras"]
         if linha["ano"] == ano and linha["cnpj"] in membros
-    }
+    ]
+    cnpjs_unidades = [linha["cnpj"] for linha in linhas_unidades]
+    if len(cnpjs_unidades) != len(set(cnpjs_unidades)):
+        raise ValueError(f"O MART 07 contém CNPJs duplicados em {ano}.")
+    unidades_por_cnpj = {linha["cnpj"]: linha for linha in linhas_unidades}
     rótulos = {
         linha["cnpj"]: rotulo_grafico(linha["cnpj"], linha["nome"], sorted(membros))
         for linha in ranking
@@ -46,9 +50,10 @@ def preparar_ranking_investimento_uc(dados: dict, ano: int) -> list[dict]:
         disponivel = bool(uc and uc.get("status") == "valid" and valor is not None)
         geo = METADADOS_POR_CNPJ.get(cnpj, {})
         unidades = unidades_por_cnpj.get(cnpj)
+        status_uc = unidades.get("status") if unidades else "sem_referencia"
         qtd_uc = (
             unidades.get("qtd_uc_dezembro")
-            if unidades and unidades.get("status") == "valid"
+            if unidades and status_uc in {"valid", "zero"}
             else None
         )
         total_realizado = (
@@ -62,7 +67,9 @@ def preparar_ranking_investimento_uc(dados: dict, ano: int) -> list[dict]:
                 "valor": valor if disponivel else None,
                 "disponível": disponivel,
                 "total_realizado": total_realizado,
+                "status_total_realizado_mart06": linha["status_realizado"],
                 "qtd_uc": qtd_uc,
+                "status_uc": status_uc,
                 "uf": geo.get("uf", "Não disponível"),
                 "regiao": geo.get("regiao", "Não disponível"),
                 "posicao_investimento": linha["posicao_ranking"],
@@ -215,8 +222,7 @@ def renderizar_comparativo_top10(dados: dict, ano: int) -> None:
         )
         return
 
-    st.title("Comparativo Top 10", anchor=False)
-    st.subheader("Explore os indicadores de cada distribuidora", anchor=False)
+    st.subheader("Comparativo Top 10", anchor=False)
 
     renderizar_grafico_investimento_uc(dados, ano)
 

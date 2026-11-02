@@ -19,10 +19,18 @@ from dashboard.data import (
     formatar_reais,
     formatar_valor_validado,
 )
+from dashboard.header import renderizar_cabecalho
+from dashboard.investimento_uc import renderizar_pagina_investimento_uc
 from dashboard.metadata import (
     METADADOS_POR_CNPJ,
     TIPOS_INVESTIMENTO_EXIBIDOS,
     nome_marca,
+)
+from dashboard.perfil_investimentos import (
+    renderizar_pagina as renderizar_perfil_investimentos,
+)
+from dashboard.planejado_realizado import (
+    renderizar_pagina as renderizar_planejado_realizado,
 )
 from dashboard.summary_table import imagem_distribuidora
 from dashboard.visuals import (
@@ -55,15 +63,20 @@ with st.sidebar:
         label_visibility="collapsed",
     )
 
-st.title("PAINEL DE DISTRIBUIÇÃO ELÉTRICA — ANEEL", anchor=False)
-st.header("GridInvest Analytics", anchor=False)
-
 with st.sidebar:
     ano_selecionado = st.selectbox(
         "Ano de referência", [2025, 2024, 2023], index=0, key="ano_referencia"
     )
 
-if pagina not in {"Visão Geral", "Comparativo Top 10"}:
+renderizar_cabecalho()
+
+if pagina not in {
+    "Visão Geral",
+    "Comparativo Top 10",
+    "Investimento por UC",
+    "Planejado x Realizado",
+    "Perfil de Investimentos",
+}:
     st.info(
         "Esta página será construída em uma próxima etapa.",
         icon=":material/construction:",
@@ -80,14 +93,17 @@ if pagina == "Comparativo Top 10":
     renderizar_comparativo_top10(dados, ano_selecionado)
     st.stop()
 
-st.subheader(
-    "Descubra quais distribuidoras lideram os investimentos no Brasil",
-    anchor=False,
-)
-st.caption(
-    "Compare investimentos realizados, perfil das obras e indicadores por empresa "
-    "com dados públicos da ANEEL."
-)
+if pagina == "Investimento por UC":
+    renderizar_pagina_investimento_uc(dados, ano_selecionado)
+    st.stop()
+
+if pagina == "Planejado x Realizado":
+    renderizar_planejado_realizado(dados, ano_selecionado)
+    st.stop()
+
+if pagina == "Perfil de Investimentos":
+    renderizar_perfil_investimentos(dados, ano_selecionado)
+    st.stop()
 
 registro_ano = next(
     item for item in dados["historico"] if item["ano"] == ano_selecionado
@@ -166,9 +182,7 @@ rotulo_por_cnpj = {
     linha["cnpj"]: rotulo_grafico(linha["cnpj"], linha["nome"], cnpjs)
     for linha in ranking_ano
 }
-ordem_distribuidoras = ordem_por_ranking_financeiro(
-    ranking_ano, rotulo_por_cnpj
-)
+ordem_distribuidoras = ordem_por_ranking_financeiro(ranking_ano, rotulo_por_cnpj)
 
 categorias_adicionais = dados["categorias_adicionais"]
 if categorias_adicionais:
@@ -310,7 +324,6 @@ grafico_tipos = (
         y=alt.Y(
             "Distribuidora:N",
             sort=ordem_distribuidoras,
-            scale=alt.Scale(reverse=True),
             title=None,
             axis=alt.Axis(labelLimit=240, labelFontSize=16, labelPadding=10),
         ),
@@ -357,7 +370,6 @@ rotulos_totais = (
         y=alt.Y(
             "Distribuidora:N",
             sort=ordem_distribuidoras,
-            scale=alt.Scale(reverse=True),
         ),
         text=alt.Text("Total compacto:N"),
     )
