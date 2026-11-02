@@ -12,6 +12,7 @@ MART_01_SQL = BASE_DIR / "sql" / "marts" / "01_investimentos_anuais.sql"
 MART_02_SQL = BASE_DIR / "sql" / "marts" / "02_investimentos_por_tipo.sql"
 MART_03_SQL = BASE_DIR / "sql" / "marts" / "03_investimento_por_uc.sql"
 MART_04_SQL = BASE_DIR / "sql" / "marts" / "04_planejado_vs_realizado.sql"
+MART_05_SQL = BASE_DIR / "sql" / "marts" / "05_evolucao_investimentos.sql"
 ANOS_MART_01 = {2023, 2024, 2025}
 ESCOPOS_MART_01 = {"nacional", "top10"}
 
@@ -545,6 +546,181 @@ def _validar_mart_04(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
 def executar_mart_04() -> dict[str, int]:
     """Executa as saídas separadas do MART 04 na transação compartilhada."""
     return executar_sql_mart(MART_04_SQL, _validar_mart_04)
+
+
+def _validar_mart_05(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
+    chaves_distribuidora = con.execute(
+        "SELECT cnpj, ano_referencia "
+        "FROM marts.evolucao_investimentos_distribuidora"
+    ).fetchall()
+    chaves_agregadas = con.execute(
+        "SELECT ano_referencia, escopo "
+        "FROM marts.evolucao_investimentos_agregada"
+    ).fetchall()
+    if not chaves_distribuidora:
+        raise ValueError("A série por distribuidora do MART 05 não produziu linhas.")
+    if len(set(chaves_distribuidora)) != len(chaves_distribuidora):
+        raise ValueError("O MART 05 contém CNPJ/ano duplicado na série individual.")
+    if set(chaves_agregadas) != {
+        (ano, escopo)
+        for ano in ANOS_MART_01
+        for escopo in ESCOPOS_MART_01
+    } or len(chaves_agregadas) != 6:
+        raise ValueError(
+            "A série agregada do MART 05 deve conter os anos 2023–2025 "
+            "nos escopos nacional e top10."
+        )
+    if {ano for _, ano in chaves_distribuidora} != ANOS_MART_01:
+        raise ValueError("A série individual do MART 05 deve cobrir 2023–2025.")
+
+    distribuidoras = dict(
+        con.execute(
+            """
+            SELECT column_name, data_type
+            FROM information_schema.columns
+            WHERE table_schema = 'marts'
+              AND table_name = 'evolucao_investimentos_distribuidora'
+            """
+        ).fetchall()
+    )
+    agregados = dict(
+        con.execute(
+            """
+            SELECT column_name, data_type
+            FROM information_schema.columns
+            WHERE table_schema = 'marts'
+              AND table_name = 'evolucao_investimentos_agregada'
+            """
+        ).fetchall()
+    )
+    if distribuidoras.get("cnpj") != "VARCHAR":
+        raise ValueError("O CNPJ do MART 05 deve permanecer como VARCHAR.")
+    for tipos in (distribuidoras, agregados):
+        for coluna in (
+            "total_planejado",
+            "total_realizado",
+            "variacao_planejado_absoluta",
+            "variacao_realizado_absoluta",
+        ):
+            if not tipos.get(coluna, "").startswith("DECIMAL"):
+                raise ValueError(f"{coluna} deve ser DECIMAL no MART 05.")
+        for coluna in (
+            "variacao_planejado_percentual",
+            "variacao_realizado_percentual",
+        ):
+            if tipos.get(coluna) != "DECIMAL(18,2)":
+                raise ValueError(f"{coluna} deve ser DECIMAL(18,2) no MART 05.")
+
+    divergencias_coorte = con.execute(
+        """
+        SELECT COUNT(*)
+        FROM marts.evolucao_investimentos_distribuidora AS d
+        WHERE d.top10_2025 IS DISTINCT FROM EXISTS (
+            SELECT 1 FROM marts.cohorte_top10_2025 AS t WHERE t.cnpj = d.cnpj
+        )
+        """
+    ).fetchone()[0]
+    if divergencias_coorte:
+        raise ValueError("A flag top10_2025 do MART 05 diverge da coorte fixa.")
+
+    divergencias_distribuidora = con.execute(
+        """
+        WITH esperado AS (
+            SELECT
+                NumCPFCNPJ AS cnpj,
+                AnoReferencia AS ano_referencia,
+                COUNT(*) AS qtd_registros_pdd,
+                SUM(VlrTotalPlanejado)
+                    FILTER (WHERE VlrTotalPlanejado_status = 'valid')
+                    AS total_planejado,
+                COUNT(*) FILTER (WHERE VlrTotalPlanejado_status = 'valid')
+                    AS qtd_planejados_validos,
+                COUNT(*) FILTER (WHERE VlrTotalPlanejado_status = 'null')
+                    AS qtd_planejados_nulos,
+                COUNT(*) FILTER (WHERE VlrTotalPlanejado_status = 'invalid')
+                    AS qtd_planejados_invalidos,
+                SUM(VlrTotalRealizado)
+                    FILTER (WHERE VlrTotalRealizado_status = 'valid')
+                    AS total_realizado,
+                COUNT(*) FILTER (WHERE VlrTotalRealizado_status = 'valid')
+                    AS qtd_realizados_validos,
+                COUNT(*) FILTER (WHERE VlrTotalRealizado_status = 'null')
+                    AS qtd_realizados_nulos,
+                COUNT(*) FILTER (WHERE VlrTotalRealizado_status = 'invalid')
+                    AS qtd_realizados_invalidos
+            FROM refined.pdd
+            WHERE AnoReferencia BETWEEN 2023 AND 2025
+            GROUP BY NumCPFCNPJ, AnoReferencia
+        )
+        SELECT COUNT(*)
+        FROM esperado AS e
+        FULL OUTER JOIN marts.evolucao_investimentos_distribuidora AS d
+          ON e.cnpj IS NOT DISTINCT FROM d.cnpj
+         AND e.ano_referencia = d.ano_referencia
+        WHERE e.ano_referencia IS NULL OR d.ano_referencia IS NULL
+           OR e.qtd_registros_pdd IS DISTINCT FROM d.qtd_registros_pdd
+           OR e.total_planejado IS DISTINCT FROM d.total_planejado
+           OR e.qtd_planejados_validos
+                IS DISTINCT FROM d.qtd_planejados_validos
+           OR e.qtd_planejados_nulos IS DISTINCT FROM d.qtd_planejados_nulos
+           OR e.qtd_planejados_invalidos
+                IS DISTINCT FROM d.qtd_planejados_invalidos
+           OR e.total_realizado IS DISTINCT FROM d.total_realizado
+           OR e.qtd_realizados_validos
+                IS DISTINCT FROM d.qtd_realizados_validos
+           OR e.qtd_realizados_nulos IS DISTINCT FROM d.qtd_realizados_nulos
+           OR e.qtd_realizados_invalidos
+                IS DISTINCT FROM d.qtd_realizados_invalidos
+        """
+    ).fetchone()[0]
+    if divergencias_distribuidora:
+        raise ValueError(
+            "A série por distribuidora do MART 05 não reconcilia com refined.pdd; "
+            f"divergências={divergencias_distribuidora}."
+        )
+
+    divergencias_agregadas = con.execute(
+        """
+        SELECT COUNT(*)
+        FROM marts.evolucao_investimentos_agregada AS e
+        FULL OUTER JOIN marts.investimentos_anuais AS a
+          ON e.ano_referencia = a.ano_referencia AND e.escopo = a.escopo
+        WHERE a.ano_referencia IS NULL OR e.ano_referencia IS NULL
+           OR e.qtd_registros_pdd IS DISTINCT FROM a.qtd_registros_pdd
+           OR e.qtd_cnpjs IS DISTINCT FROM a.qtd_cnpjs
+           OR e.total_planejado IS DISTINCT FROM a.total_planejado
+           OR e.qtd_planejados_validos
+                IS DISTINCT FROM a.qtd_planejados_validos
+           OR e.qtd_planejados_nulos IS DISTINCT FROM a.qtd_planejados_nulos
+           OR e.qtd_planejados_invalidos
+                IS DISTINCT FROM a.qtd_planejados_invalidos
+           OR e.status_total_planejado
+                IS DISTINCT FROM a.status_total_planejado
+           OR e.total_realizado IS DISTINCT FROM a.total_realizado
+           OR e.qtd_realizados_validos
+                IS DISTINCT FROM a.qtd_realizados_validos
+           OR e.qtd_realizados_nulos IS DISTINCT FROM a.qtd_realizados_nulos
+           OR e.qtd_realizados_invalidos
+                IS DISTINCT FROM a.qtd_realizados_invalidos
+           OR e.status_total_realizado
+                IS DISTINCT FROM a.status_total_realizado
+        """
+    ).fetchone()[0]
+    if divergencias_agregadas:
+        raise ValueError(
+            "A série agregada do MART 05 não reconcilia com o MART 01; "
+            f"divergências={divergencias_agregadas}."
+        )
+
+    return {
+        "linhas_distribuidoras": len(chaves_distribuidora),
+        "linhas_agregadas": len(chaves_agregadas),
+    }
+
+
+def executar_mart_05() -> dict[str, int]:
+    """Executa as séries de evolução no executor transacional compartilhado."""
+    return executar_sql_mart(MART_05_SQL, _validar_mart_05)
 
 
 if __name__ == "__main__":

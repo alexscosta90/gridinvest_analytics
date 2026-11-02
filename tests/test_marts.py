@@ -141,6 +141,26 @@ def linhas_mart04():
     ]
 
 
+def linhas_mart05():
+    return [
+        (COORTE_CNPJS[0], 2022, "Expansão", Decimal("100.00"), "valid", Decimal("100.00"), "valid"),
+        (COORTE_CNPJS[0], 2023, "Expansão", Decimal("150.00"), "valid", Decimal("120.00"), "valid"),
+        (COORTE_CNPJS[0], 2024, "Expansão", Decimal("150.00"), "valid", Decimal("120.00"), "valid"),
+        (COORTE_CNPJS[0], 2025, "Expansão", Decimal("120.00"), "valid", Decimal("150.00"), "valid"),
+        (COORTE_CNPJS[1], 2023, "Expansão", Decimal("50.00"), "valid", Decimal("40.00"), "valid"),
+        (COORTE_CNPJS[1], 2025, "Expansão", Decimal("60.00"), "valid", Decimal("50.00"), "valid"),
+        (COORTE_CNPJS[2], 2022, "Expansão", Decimal("0.00"), "valid", Decimal("0.00"), "valid"),
+        (COORTE_CNPJS[2], 2023, "Expansão", Decimal("20.00"), "valid", Decimal("10.00"), "valid"),
+        (COORTE_CNPJS[3], 2022, "Expansão", None, "null", None, "invalid"),
+        (COORTE_CNPJS[3], 2023, "Expansão", Decimal("10.00"), "valid", Decimal("5.00"), "valid"),
+        (COORTE_CNPJS[4], 2022, "Expansão", None, "invalid", None, "null"),
+        (COORTE_CNPJS[4], 2023, "Expansão", Decimal("10.00"), "valid", Decimal("5.00"), "valid"),
+        (OUTRO_CNPJ, 2023, "Expansão", Decimal("10.00"), "valid", Decimal("12.00"), "valid"),
+        (OUTRO_CNPJ, 2024, "Expansão", Decimal("15.00"), "valid", Decimal("15.00"), "valid"),
+        (OUTRO_CNPJ, 2025, "Expansão", Decimal("20.00"), "valid", Decimal("18.00"), "valid"),
+    ]
+
+
 def linhas_indger_mart03():
     linhas = [
         (
@@ -1035,4 +1055,231 @@ def test_mart04_rollback_preserva_as_duas_saidas(tmp_path, monkeypatch):
         ).fetchall()
     assert anterior_distribuidora == [("anterior_distribuidora",)]
     assert anterior_nacional == [("anterior_nacional",)]
+
+
+def test_mart05_evolucao_temporal_e_reconciliacao(tmp_path, monkeypatch):
+    banco = tmp_path / "mart05_test.duckdb"
+    preparar_banco(banco, linhas_mart05())
+    conectar_teste(banco, monkeypatch)
+
+    assert marts.executar_mart_01() == {"linhas": 6}
+    assert marts.executar_mart_02() == {"linhas": 6}
+    assert marts.executar_mart_03()["linhas"] == 19
+    assert marts.executar_mart_04() == {
+        "linhas_distribuidoras": 11,
+        "linhas_nacionais": 3,
+    }
+    resultado = marts.executar_mart_05()
+
+    assert resultado == {"linhas_distribuidoras": 11, "linhas_agregadas": 6}
+    with duckdb.connect(str(banco)) as con:
+        distribuidores = con.execute(
+            """
+            SELECT cnpj, ano_referencia, top10_2025, ano_anterior,
+                   total_planejado, variacao_planejado_absoluta,
+                   status_variacao_planejado_absoluta,
+                   variacao_planejado_percentual,
+                   status_variacao_planejado_percentual,
+                   total_realizado, variacao_realizado_absoluta,
+                   status_variacao_realizado_absoluta,
+                   variacao_realizado_percentual,
+                   status_variacao_realizado_percentual
+            FROM marts.evolucao_investimentos_distribuidora
+            """
+        ).fetchall()
+        agregados = con.execute(
+            """
+            SELECT ano_referencia, escopo, ano_anterior,
+                   total_planejado, variacao_planejado_absoluta,
+                   status_variacao_planejado_absoluta,
+                   variacao_planejado_percentual,
+                   total_realizado, variacao_realizado_absoluta,
+                   status_variacao_realizado_absoluta,
+                   variacao_realizado_percentual
+            FROM marts.evolucao_investimentos_agregada
+            ORDER BY ano_referencia, escopo
+            """
+        ).fetchall()
+        anos_exibidos = con.execute(
+            """
+            SELECT MIN(ano_referencia), MAX(ano_referencia)
+            FROM marts.evolucao_investimentos_distribuidora
+            """
+        ).fetchone()
+        tipos = dict(
+            con.execute(
+                """
+                SELECT column_name, data_type
+                FROM information_schema.columns
+                WHERE table_schema = 'marts'
+                  AND table_name = 'evolucao_investimentos_distribuidora'
+                """
+            ).fetchall()
+        )
+        duplicadas = con.execute(
+            """
+            SELECT COUNT(*) FROM (
+                SELECT cnpj, ano_referencia
+                FROM marts.evolucao_investimentos_distribuidora
+                GROUP BY cnpj, ano_referencia HAVING COUNT(*) > 1
+            )
+            """
+        ).fetchone()[0]
+        cnpjs_individuais = con.execute(
+            "SELECT COUNT(DISTINCT cnpj) FROM marts.evolucao_investimentos_distribuidora"
+        ).fetchone()[0]
+
+    def distribuidora(cnpj, ano):
+        return next(row for row in distribuidores if row[0] == cnpj and row[1] == ano)
+
+    evolucao_positiva = distribuidora(COORTE_CNPJS[0], 2023)
+    assert evolucao_positiva[2:9] == (
+        True,
+        2022,
+        Decimal("150.00"),
+        Decimal("50.00"),
+        "valid",
+        Decimal("50.00"),
+        "valid",
+    )
+    assert evolucao_positiva[9:14] == (
+        Decimal("120.00"),
+        Decimal("20.00"),
+        "valid",
+        Decimal("20.00"),
+        "valid",
+    )
+    assert distribuidora(OUTRO_CNPJ, 2023)[2] is False
+
+    evolucao_zero = distribuidora(COORTE_CNPJS[0], 2024)
+    assert evolucao_zero[5:9] == (
+        Decimal("0.00"),
+        "valid",
+        Decimal("0.00"),
+        "valid",
+    )
+    assert evolucao_zero[10:14] == (
+        Decimal("0.00"),
+        "valid",
+        Decimal("0.00"),
+        "valid",
+    )
+
+    evolucao_negativa = distribuidora(COORTE_CNPJS[0], 2025)
+    assert evolucao_negativa[5:9] == (
+        Decimal("-30.00"),
+        "valid",
+        Decimal("-20.00"),
+        "valid",
+    )
+    assert evolucao_negativa[10:14] == (
+        Decimal("30.00"),
+        "valid",
+        Decimal("25.00"),
+        "valid",
+    )
+
+    sem_ano_anterior = distribuidora(COORTE_CNPJS[1], 2023)
+    assert sem_ano_anterior[3] is None
+    assert sem_ano_anterior[5] is None
+    assert sem_ano_anterior[6] == "ano_anterior_ausente"
+    assert sem_ano_anterior[8] == "ano_anterior_ausente"
+    ano_intermediario_ausente = distribuidora(COORTE_CNPJS[1], 2025)
+    assert ano_intermediario_ausente[3] == 2023
+    assert ano_intermediario_ausente[6] == "ano_intermediario_ausente"
+    assert ano_intermediario_ausente[8] == "ano_intermediario_ausente"
+
+    base_zero = distribuidora(COORTE_CNPJS[2], 2023)
+    assert base_zero[5] == Decimal("20.00")
+    assert base_zero[6] == "valid"
+    assert base_zero[7] is None
+    assert base_zero[8] == "base_zero"
+    assert base_zero[10] == Decimal("10.00")
+    assert base_zero[13] == "base_zero"
+
+    base_nulo = distribuidora(COORTE_CNPJS[3], 2023)
+    assert base_nulo[6] == "valor_anterior_null"
+    assert base_nulo[8] == "valor_anterior_null"
+    assert base_nulo[11] == "valor_anterior_invalid"
+    assert base_nulo[13] == "valor_anterior_invalid"
+    base_invalido = distribuidora(COORTE_CNPJS[4], 2023)
+    assert base_invalido[6] == "valor_anterior_invalid"
+    assert base_invalido[8] == "valor_anterior_invalid"
+    assert base_invalido[11] == "valor_anterior_null"
+    assert base_invalido[13] == "valor_anterior_null"
+
+    assert len(agregados) == 6
+    assert anos_exibidos == (2023, 2025)
+    assert all(row[2] == 2022 for row in agregados if row[0] == 2023)
+    assert duplicadas == 0
+    assert cnpjs_individuais == 6
+    assert tipos["cnpj"] == "VARCHAR"
+    assert tipos["total_planejado"].startswith("DECIMAL")
+    assert tipos["total_realizado"].startswith("DECIMAL")
+    assert tipos["variacao_planejado_percentual"] == "DECIMAL(18,2)"
+    assert tipos["variacao_realizado_percentual"] == "DECIMAL(18,2)"
+    assert all(row[0] >= 2023 for row in agregados)
+
+
+def test_mart05_idempotente(tmp_path, monkeypatch):
+    banco = tmp_path / "mart05_idempotente.duckdb"
+    preparar_banco(banco, linhas_mart05())
+    conectar_teste(banco, monkeypatch)
+    marts.executar_mart_01()
+
+    marts.executar_mart_05()
+    with duckdb.connect(str(banco)) as con:
+        primeira_distribuidora = con.execute(
+            "SELECT * FROM marts.evolucao_investimentos_distribuidora "
+            "ORDER BY ano_referencia, cnpj"
+        ).fetchall()
+        primeiro_agregado = con.execute(
+            "SELECT * FROM marts.evolucao_investimentos_agregada "
+            "ORDER BY ano_referencia, escopo"
+        ).fetchall()
+    marts.executar_mart_05()
+    with duckdb.connect(str(banco)) as con:
+        segunda_distribuidora = con.execute(
+            "SELECT * FROM marts.evolucao_investimentos_distribuidora "
+            "ORDER BY ano_referencia, cnpj"
+        ).fetchall()
+        segundo_agregado = con.execute(
+            "SELECT * FROM marts.evolucao_investimentos_agregada "
+            "ORDER BY ano_referencia, escopo"
+        ).fetchall()
+
+    assert segunda_distribuidora == primeira_distribuidora
+    assert segundo_agregado == primeiro_agregado
+
+
+def test_mart05_rollback_preserva_as_duas_series(tmp_path, monkeypatch):
+    banco = tmp_path / "mart05_rollback.duckdb"
+    preparar_banco(banco, linhas_mart05())
+    with duckdb.connect(str(banco)) as con:
+        con.execute("CREATE SCHEMA marts")
+        con.execute(
+            "CREATE TABLE marts.evolucao_investimentos_distribuidora "
+            "AS SELECT 'anterior_distribuidora' AS marcador"
+        )
+        con.execute(
+            "CREATE TABLE marts.evolucao_investimentos_agregada "
+            "AS SELECT 'anterior_agregada' AS marcador"
+        )
+    conectar_teste(banco, monkeypatch)
+
+    def falhar_apos_sql(con):
+        raise ValueError("falha simulada após materializar MART 05")
+
+    with pytest.raises(ValueError, match="falha simulada após materializar"):
+        marts.executar_sql_mart(marts.MART_05_SQL, falhar_apos_sql)
+
+    with duckdb.connect(str(banco)) as con:
+        anterior_distribuidora = con.execute(
+            "SELECT marcador FROM marts.evolucao_investimentos_distribuidora"
+        ).fetchall()
+        anterior_agregada = con.execute(
+            "SELECT marcador FROM marts.evolucao_investimentos_agregada"
+        ).fetchall()
+    assert anterior_distribuidora == [("anterior_distribuidora",)]
+    assert anterior_agregada == [("anterior_agregada",)]
 
