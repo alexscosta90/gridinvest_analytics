@@ -226,7 +226,9 @@ name = "gridinvest-analytics"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "altair" },
     { name = "duckdb" },
+    { name = "pandas" },
     { name = "streamlit" },
 ]
 
@@ -238,7 +240,9 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "altair", specifier = ">=6.3.0,<7" },
     { name = "duckdb", specifier = ">=2.0.0" },
+    { name = "pandas", specifier = ">=3.1.0,<4" },
     { name = "streamlit", specifier = ">=1.66.1" },
 ]
 
