@@ -1,4 +1,5 @@
 import base64
+import hashlib
 from decimal import Decimal
 from pathlib import Path
 
@@ -328,6 +329,15 @@ def test_leitura_consulta_somente_top10_e_coorte(banco_dashboard):
         if item["cnpj"] == "cnpj-1" and item["ano"] == 2025
     )
     assert valor_uc["valor"] == Decimal("0.03")
+
+
+def test_leitura_dashboard_nao_altera_banco_original(banco_dashboard):
+    antes = hashlib.sha256(Path(banco_dashboard).read_bytes()).hexdigest()
+
+    ler_dados_visao_geral(banco_dashboard)
+
+    depois = hashlib.sha256(Path(banco_dashboard).read_bytes()).hexdigest()
+    assert depois == antes
 
 
 def test_calculo_taxa_execucao_arredondado():

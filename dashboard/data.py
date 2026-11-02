@@ -7,6 +7,7 @@ from typing import Any
 import duckdb
 import streamlit as st
 
+from dashboard.database import resolver_caminho_banco
 from dashboard.metadata import TIPOS_INVESTIMENTO_EXIBIDOS
 from pipeline.db import DB_PATH
 
@@ -491,7 +492,7 @@ def ler_dados_visao_geral(
 @st.cache_data(ttl=300, max_entries=4, show_spinner=False)
 def carregar_dados_visao_geral() -> dict[str, Any]:
     """Mantém os indicadores em cache por cinco minutos durante interações."""
-    return ler_dados_visao_geral(DB_PATH)
+    return ler_dados_visao_geral(resolver_caminho_banco(caminho_local=DB_PATH))
 
 
 def calcular_taxa_execucao(

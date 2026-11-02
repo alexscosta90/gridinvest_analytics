@@ -22,3 +22,6 @@ raw/*.parquet
 
 # Arquivos temporarios dos testes
 tmp_pytest/
+
+# Artefatos locais de publicação (bancos reduzidos e avisos)
+/artifacts/
