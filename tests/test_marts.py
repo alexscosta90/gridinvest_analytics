@@ -52,9 +52,17 @@ def preparar_banco(caminho, linhas_pdd, linhas_indger=None):
         """
     )
     con.execute("ALTER TABLE refined.pdd ADD COLUMN SigAgente VARCHAR")
+    con.execute("ALTER TABLE refined.pdd ADD COLUMN DscTipoObraClasse VARCHAR")
     con.executemany(
-        "INSERT INTO refined.pdd VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        [(*linha, f"Agente {linha[0]}") for linha in linhas_pdd],
+        "INSERT INTO refined.pdd VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                *linha[:7],
+                f"Agente {linha[0]}",
+                linha[7] if len(linha) > 7 else "",
+            )
+            for linha in linhas_pdd
+        ],
     )
     con.execute(
         """
@@ -238,6 +246,65 @@ def linhas_pdd_mart07():
         for ano in (2023, 2024, 2025)
         for indice, cnpj in enumerate(COORTE_CNPJS)
     ]
+
+
+def linhas_mart08():
+    linhas = []
+    for ano in (2023, 2024, 2025):
+        for indice, cnpj in enumerate(COORTE_CNPJS):
+            if ano == 2023 and indice == 0:
+                linhas.extend(
+                    [
+                        (cnpj, ano, "Expansão", Decimal("40.00"), "valid", Decimal("20.00"), "valid", ""),
+                        (cnpj, ano, "Expansão", Decimal("20.00"), "valid", Decimal("10.00"), "valid", ""),
+                        (cnpj, ano, "Expansão", Decimal("40.00"), "valid", Decimal("20.00"), "valid", "Luz Para Todos"),
+                        (cnpj, ano, "Melhoria", Decimal("0.00"), "valid", Decimal("0.00"), "valid", None),
+                        (cnpj, ano, "Renovação", Decimal("0.00"), "valid", Decimal("0.00"), "valid", "Planejamento Setorial"),
+                        (cnpj, ano, "Obra com Participação Financeira", Decimal("5.00"), "valid", Decimal("2.00"), "valid", "Obra com Participação Financeira"),
+                        (cnpj, ano, "Tipo adicional", Decimal("7.00"), "valid", Decimal("3.00"), "valid", "Classe adicional"),
+                    ]
+                )
+            elif ano == 2023 and indice == 1:
+                linhas.append(
+                    (cnpj, ano, "Expansão", Decimal("0.00"), "valid", Decimal("20.00"), "valid", "")
+                )
+            elif ano == 2023 and indice == 2:
+                linhas.append((cnpj, ano, "Melhoria", None, "null", Decimal("30.00"), "valid", None))
+            elif ano == 2023 and indice == 3:
+                linhas.append((cnpj, ano, "Renovação", None, "invalid", Decimal("40.00"), "valid", "Classe inválida"))
+            elif ano == 2023 and indice == 4:
+                linhas.extend(
+                    [
+                        (cnpj, ano, "Melhoria", Decimal("80.00"), "valid", Decimal("40.00"), "valid", "Classe parcial"),
+                        (cnpj, ano, "Melhoria", None, "null", Decimal("10.00"), "valid", "Classe parcial"),
+                    ]
+                )
+            else:
+                linhas.append(
+                    (
+                        cnpj,
+                        ano,
+                        "Expansão",
+                        Decimal(100 + indice),
+                        "valid",
+                        Decimal(50 + indice),
+                        "valid",
+                        "",
+                    )
+                )
+        linhas.append(
+            (
+                OUTRO_CNPJ,
+                ano,
+                "Expansão",
+                Decimal("500.00"),
+                "valid",
+                Decimal("250.00"),
+                "valid",
+                "Classe nacional",
+            )
+        )
+    return linhas
 
 
 def linhas_indger_mart03():
@@ -1816,4 +1883,187 @@ def test_mart07_idempotente_e_rollback(tmp_path, monkeypatch):
         ).fetchall()
     assert top10_anterior == [("anterior_top10",)]
     assert nacional_anterior == [("anterior_nacional",)]
+
+
+def test_mart08_perfil_reconcilia_preserva_dimensoes_e_percentuais(
+    tmp_path, monkeypatch
+):
+    banco = tmp_path / "mart08_test.duckdb"
+    preparar_banco(banco, linhas_mart08(), linhas_indger_mart07())
+    conectar_teste(banco, monkeypatch)
+
+    marts.executar_mart_01()
+    marts.executar_mart_02()
+    marts.executar_mart_03()
+    marts.executar_mart_04()
+    marts.executar_mart_05()
+    marts.executar_mart_06()
+    marts.executar_mart_07()
+    resultado = marts.executar_mart_08()
+
+    with duckdb.connect(str(banco)) as con:
+        contagens = con.execute(
+            """
+            SELECT escopo, COUNT(*)
+            FROM marts.perfil_investimentos GROUP BY escopo
+            """
+        ).fetchall()
+        linhas = con.execute(
+            """
+            SELECT escopo, cnpj, ano_referencia, tipo_obra, classe_obra,
+                   status_classe_obra, qtd_registros_pdd, total_planejado,
+                   qtd_planejados_validos, qtd_planejados_nulos,
+                   qtd_planejados_invalidos, status_investimento_planejado,
+                   total_realizado, qtd_realizados_validos,
+                   qtd_realizados_nulos, qtd_realizados_invalidos,
+                   status_investimento_realizado,
+                   participacao_planejado_percentual,
+                   status_participacao_planejado,
+                   participacao_realizado_percentual,
+                   status_participacao_realizado
+            FROM marts.perfil_investimentos
+            """
+        ).fetchall()
+        duplicadas = con.execute(
+            """
+            SELECT COUNT(*) FROM (
+                SELECT escopo, cnpj, ano_referencia, tipo_obra, classe_obra
+                FROM marts.perfil_investimentos
+                GROUP BY escopo, cnpj, ano_referencia, tipo_obra, classe_obra
+                HAVING COUNT(*) > 1
+            )
+            """
+        ).fetchone()[0]
+        tipos_reais = con.execute(
+            "SELECT DISTINCT tipo_obra FROM marts.perfil_investimentos "
+            "WHERE escopo = 'nacional' ORDER BY tipo_obra NULLS FIRST"
+        ).fetchall()
+        classes_reais = con.execute(
+            "SELECT DISTINCT classe_obra FROM marts.perfil_investimentos "
+            "WHERE escopo = 'nacional' ORDER BY classe_obra NULLS FIRST"
+        ).fetchall()
+        perfil_cnpj_ano = con.execute(
+            """
+            SELECT SUM(total_planejado), SUM(total_realizado)
+            FROM marts.perfil_investimentos
+            WHERE escopo = 'top10' AND cnpj = ? AND ano_referencia = 2023
+            """,
+            [TOP10_CNPJ],
+        ).fetchone()
+        tipos_colunas = dict(
+            con.execute(
+                """
+                SELECT column_name, data_type
+                FROM information_schema.columns
+                WHERE table_schema='marts' AND table_name='perfil_investimentos'
+                """
+            ).fetchall()
+        )
+
+    assert resultado["linhas"] == sum(linhas for _, linhas in contagens)
+    assert resultado["linhas_top10"] == dict(contagens)["top10"]
+    assert resultado["linhas_nacionais"] == dict(contagens)["nacional"]
+    assert duplicadas == 0
+    assert {row[0] for row in tipos_reais} >= {
+        "Expansão",
+        "Melhoria",
+        "Renovação",
+        "Obra com Participação Financeira",
+        "Tipo adicional",
+    }
+    assert ("",) in classes_reais
+    assert (None,) in classes_reais
+    assert ("Classe adicional",) in classes_reais
+    assert perfil_cnpj_ano == (Decimal("112.00"), Decimal("55.00"))
+    assert tipos_colunas["cnpj"] == "VARCHAR"
+    assert tipos_colunas["total_planejado"].startswith("DECIMAL")
+    assert tipos_colunas["total_realizado"].startswith("DECIMAL")
+    assert tipos_colunas["participacao_planejado_percentual"] == "DECIMAL(18,2)"
+    assert tipos_colunas["participacao_realizado_percentual"] == "DECIMAL(18,2)"
+
+    def buscar(cnpj, tipo, classe, escopo="top10", ano=2023):
+        return next(
+            row
+            for row in linhas
+            if row[0:5] == (escopo, cnpj, ano, tipo, classe)
+        )
+
+    expansao_vazia = buscar(TOP10_CNPJ, "Expansão", "")
+    assert expansao_vazia[5:12] == (
+        "vazia",
+        2,
+        Decimal("60.00"),
+        2,
+        0,
+        0,
+        "valid",
+    )
+    assert expansao_vazia[17:21] == (
+        Decimal("53.57"),
+        "valid",
+        Decimal("54.55"),
+        "valid",
+    )
+    classe_nula = buscar(TOP10_CNPJ, "Melhoria", None)
+    assert classe_nula[5] == "nula"
+    assert classe_nula[7] == Decimal("0.00")
+    assert classe_nula[17] == Decimal("0.00")
+
+    planejado_zero = buscar(COORTE_CNPJS[1], "Expansão", "")
+    assert planejado_zero[11] == "valid"
+    assert planejado_zero[18] == "denominador_zero"
+    assert planejado_zero[17] is None
+    planejado_nulo = buscar(COORTE_CNPJS[2], "Melhoria", None)
+    assert planejado_nulo[11] == "null"
+    assert planejado_nulo[18] == "denominador_null"
+    assert planejado_nulo[17] is None
+    planejado_invalido = buscar(COORTE_CNPJS[3], "Renovação", "Classe inválida")
+    assert planejado_invalido[11] == "invalid"
+    assert planejado_invalido[18] == "denominador_invalid"
+    assert planejado_invalido[17] is None
+    planejado_parcial = buscar(COORTE_CNPJS[4], "Melhoria", "Classe parcial")
+    assert planejado_parcial[11] == "partial"
+    assert planejado_parcial[18] == "denominador_partial"
+    assert planejado_parcial[17] is None
+    tipo_adicional = buscar(TOP10_CNPJ, "Tipo adicional", "Classe adicional")
+    assert tipo_adicional[7] == Decimal("7.00")
+    assert tipo_adicional[17] == Decimal("6.25")
+
+
+def test_mart08_idempotente_e_rollback(tmp_path, monkeypatch):
+    banco = tmp_path / "mart08_idempotencia_rollback.duckdb"
+    preparar_banco(banco, linhas_mart08(), linhas_indger_mart07())
+    conectar_teste(banco, monkeypatch)
+    marts.executar_mart_01()
+    marts.executar_mart_02()
+
+    marts.executar_mart_08()
+    with duckdb.connect(str(banco)) as con:
+        primeira = con.execute(
+            "SELECT * FROM marts.perfil_investimentos "
+            "ORDER BY escopo, ano_referencia, cnpj, tipo_obra, classe_obra"
+        ).fetchall()
+    marts.executar_mart_08()
+    with duckdb.connect(str(banco)) as con:
+        segunda = con.execute(
+            "SELECT * FROM marts.perfil_investimentos "
+            "ORDER BY escopo, ano_referencia, cnpj, tipo_obra, classe_obra"
+        ).fetchall()
+        con.execute(
+            "CREATE OR REPLACE TABLE marts.perfil_investimentos "
+            "AS SELECT 'anterior' AS marcador"
+        )
+    assert segunda == primeira
+
+    def falhar_apos_sql(con):
+        raise ValueError("falha simulada após materializar MART 08")
+
+    with pytest.raises(ValueError, match="falha simulada após materializar"):
+        marts.executar_sql_mart(marts.MART_08_SQL, falhar_apos_sql)
+
+    with duckdb.connect(str(banco)) as con:
+        anterior = con.execute(
+            "SELECT marcador FROM marts.perfil_investimentos"
+        ).fetchall()
+    assert anterior == [("anterior",)]
 
