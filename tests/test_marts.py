@@ -125,6 +125,22 @@ def linhas_mart03():
     ]
 
 
+def linhas_mart04():
+    return [
+        (COORTE_CNPJS[0], 2023, "Expansão", Decimal("100.00"), "valid", Decimal("120.00"), "valid"),
+        (COORTE_CNPJS[1], 2023, "Melhoria", Decimal("100.00"), "valid", Decimal("80.00"), "valid"),
+        (COORTE_CNPJS[2], 2023, "Renovação", Decimal("0.00"), "valid", Decimal("10.00"), "valid"),
+        (COORTE_CNPJS[3], 2023, "Expansão", None, "null", Decimal("5.00"), "valid"),
+        (COORTE_CNPJS[4], 2023, "Melhoria", None, "invalid", Decimal("4.00"), "valid"),
+        (COORTE_CNPJS[5], 2023, "Renovação", Decimal("100.00"), "valid", Decimal("0.00"), "valid"),
+        (COORTE_CNPJS[0], 2024, "Expansão", Decimal("200.00"), "valid", Decimal("100.00"), "valid"),
+        (COORTE_CNPJS[1], 2024, "Melhoria", Decimal("50.00"), "valid", Decimal("75.00"), "valid"),
+        (COORTE_CNPJS[5], 2024, "Renovação", Decimal("100.00"), "valid", Decimal("0.00"), "valid"),
+        (COORTE_CNPJS[0], 2025, "Expansão", Decimal("100.00"), "valid", Decimal("100.00"), "valid"),
+        (COORTE_CNPJS[1], 2025, "Melhoria", Decimal("100.00"), "valid", Decimal("150.00"), "valid"),
+    ]
+
+
 def linhas_indger_mart03():
     linhas = [
         (
@@ -778,4 +794,245 @@ def test_mart03_falha_apos_sql_reverte_tabela_e_coorte(tmp_path, monkeypatch):
         ).fetchone()[0]
     assert anterior == [("anterior",)]
     assert coorte == 0
+
+
+def test_mart04_calcula_diferencas_percentuais_e_granularidades(
+    tmp_path, monkeypatch
+):
+    banco = tmp_path / "mart04_test.duckdb"
+    preparar_banco(banco, linhas_mart04())
+    conectar_teste(banco, monkeypatch)
+
+    assert marts.executar_mart_01() == {"linhas": 6}
+    assert marts.executar_mart_02() == {"linhas": 16}
+    assert marts.executar_mart_03()["linhas"] == 22
+    resultado = marts.executar_mart_04()
+
+    assert resultado == {"linhas_distribuidoras": 11, "linhas_nacionais": 3}
+    with duckdb.connect(str(banco)) as con:
+        distribuidoras = con.execute(
+            """
+            SELECT cnpj, ano_referencia, total_planejado, total_realizado,
+                   diferenca_absoluta, percentual_execucao,
+                   status_percentual_execucao, diferenca_percentual,
+                   status_total_planejado, status_total_realizado,
+                   status_diferenca, top10_2025
+            FROM marts.planejado_vs_realizado_distribuidora
+            """
+        ).fetchall()
+        nacionais = con.execute(
+            """
+            SELECT ano_referencia, total_planejado, total_realizado,
+                   diferenca_absoluta, percentual_execucao,
+                   status_percentual_execucao, diferenca_percentual,
+                   status_total_planejado, status_total_realizado
+            FROM marts.planejado_vs_realizado_nacional
+            ORDER BY ano_referencia
+            """
+        ).fetchall()
+        tipos = dict(
+            con.execute(
+                """
+                SELECT column_name, data_type
+                FROM information_schema.columns
+                WHERE table_schema = 'marts'
+                  AND table_name = 'planejado_vs_realizado_distribuidora'
+                """
+            ).fetchall()
+        )
+        chaves_duplicadas = con.execute(
+            """
+            SELECT COUNT(*) FROM (
+                SELECT cnpj, ano_referencia
+                FROM marts.planejado_vs_realizado_distribuidora
+                GROUP BY cnpj, ano_referencia HAVING COUNT(*) > 1
+            )
+            """
+        ).fetchone()[0]
+        nacional_tem_cnpj = con.execute(
+            """
+            SELECT COUNT(*) FROM information_schema.columns
+            WHERE table_schema = 'marts'
+              AND table_name = 'planejado_vs_realizado_nacional'
+              AND column_name = 'cnpj'
+            """
+        ).fetchone()[0]
+
+    assert chaves_duplicadas == 0
+    assert nacional_tem_cnpj == 0
+    assert tipos["cnpj"] == "VARCHAR"
+    assert tipos["total_planejado"].startswith("DECIMAL")
+    assert tipos["total_realizado"].startswith("DECIMAL")
+    assert tipos["diferenca_absoluta"].startswith("DECIMAL")
+    assert tipos["percentual_execucao"] == "DECIMAL(18,2)"
+    assert tipos["diferenca_percentual"] == "DECIMAL(18,2)"
+
+    def distribuidora(cnpj, ano):
+        return next(
+            row for row in distribuidoras if row[0] == cnpj and row[1] == ano
+        )
+
+    acima = distribuidora(COORTE_CNPJS[0], 2023)
+    assert acima[2:8] == (
+        Decimal("100.00"),
+        Decimal("120.00"),
+        Decimal("20.00"),
+        Decimal("120.00"),
+        "valid",
+        Decimal("20.00"),
+    )
+    assert acima[11] is True
+
+    abaixo = distribuidora(COORTE_CNPJS[1], 2023)
+    assert abaixo[2:8] == (
+        Decimal("100.00"),
+        Decimal("80.00"),
+        Decimal("-20.00"),
+        Decimal("80.00"),
+        "valid",
+        Decimal("-20.00"),
+    )
+
+    planejado_zero = distribuidora(COORTE_CNPJS[2], 2023)
+    assert planejado_zero[2:8] == (
+        Decimal("0.00"),
+        Decimal("10.00"),
+        Decimal("10.00"),
+        None,
+        "planejado_zero",
+        None,
+    )
+    assert planejado_zero[8] == "valid"
+
+    planejado_nulo = distribuidora(COORTE_CNPJS[3], 2023)
+    assert planejado_nulo[2:8] == (
+        None,
+        Decimal("5.00"),
+        None,
+        None,
+        "planejado_null",
+        None,
+    )
+    assert planejado_nulo[8:11] == ("null", "valid", "null")
+
+    planejado_invalido = distribuidora(COORTE_CNPJS[4], 2023)
+    assert planejado_invalido[2:8] == (
+        None,
+        Decimal("4.00"),
+        None,
+        None,
+        "planejado_invalid",
+        None,
+    )
+    assert planejado_invalido[8:11] == ("invalid", "valid", "invalid")
+
+    realizado_zero = distribuidora(COORTE_CNPJS[5], 2023)
+    assert realizado_zero[2:8] == (
+        Decimal("100.00"),
+        Decimal("0.00"),
+        Decimal("-100.00"),
+        Decimal("0.00"),
+        "valid",
+        Decimal("-100.00"),
+    )
+    assert realizado_zero[9] == "valid"
+
+    assert nacionais == [
+        (
+            2023,
+            Decimal("300.00"),
+            Decimal("219.00"),
+            None,
+            None,
+            "planejado_invalid",
+            None,
+            "invalid",
+            "valid",
+        ),
+        (
+            2024,
+            Decimal("350.00"),
+            Decimal("175.00"),
+            Decimal("-175.00"),
+            Decimal("50.00"),
+            "valid",
+            Decimal("-50.00"),
+            "valid",
+            "valid",
+        ),
+        (
+            2025,
+            Decimal("200.00"),
+            Decimal("250.00"),
+            Decimal("50.00"),
+            Decimal("125.00"),
+            "valid",
+            Decimal("25.00"),
+            "valid",
+            "valid",
+        ),
+    ]
+
+
+def test_mart04_idempotente(tmp_path, monkeypatch):
+    banco = tmp_path / "mart04_idempotente.duckdb"
+    preparar_banco(banco, linhas_mart04())
+    conectar_teste(banco, monkeypatch)
+    marts.executar_mart_01()
+
+    marts.executar_mart_04()
+    with duckdb.connect(str(banco)) as con:
+        primeira_distribuidora = con.execute(
+            "SELECT * FROM marts.planejado_vs_realizado_distribuidora "
+            "ORDER BY ano_referencia, cnpj"
+        ).fetchall()
+        primeiro_nacional = con.execute(
+            "SELECT * FROM marts.planejado_vs_realizado_nacional "
+            "ORDER BY ano_referencia"
+        ).fetchall()
+    marts.executar_mart_04()
+    with duckdb.connect(str(banco)) as con:
+        segunda_distribuidora = con.execute(
+            "SELECT * FROM marts.planejado_vs_realizado_distribuidora "
+            "ORDER BY ano_referencia, cnpj"
+        ).fetchall()
+        segundo_nacional = con.execute(
+            "SELECT * FROM marts.planejado_vs_realizado_nacional "
+            "ORDER BY ano_referencia"
+        ).fetchall()
+
+    assert segunda_distribuidora == primeira_distribuidora
+    assert segundo_nacional == primeiro_nacional
+
+
+def test_mart04_rollback_preserva_as_duas_saidas(tmp_path, monkeypatch):
+    banco = tmp_path / "mart04_rollback.duckdb"
+    preparar_banco(banco, linhas_mart04())
+    with duckdb.connect(str(banco)) as con:
+        con.execute("CREATE SCHEMA marts")
+        con.execute(
+            "CREATE TABLE marts.planejado_vs_realizado_distribuidora "
+            "AS SELECT 'anterior_distribuidora' AS marcador"
+        )
+        con.execute(
+            "CREATE TABLE marts.planejado_vs_realizado_nacional "
+            "AS SELECT 'anterior_nacional' AS marcador"
+        )
+    conectar_teste(banco, monkeypatch)
+
+    def falhar_apos_sql(con):
+        raise ValueError("falha simulada após materializar MART 04")
+
+    with pytest.raises(ValueError, match="falha simulada após materializar"):
+        marts.executar_sql_mart(marts.MART_04_SQL, falhar_apos_sql)
+
+    with duckdb.connect(str(banco)) as con:
+        anterior_distribuidora = con.execute(
+            "SELECT marcador FROM marts.planejado_vs_realizado_distribuidora"
+        ).fetchall()
+        anterior_nacional = con.execute(
+            "SELECT marcador FROM marts.planejado_vs_realizado_nacional"
+        ).fetchall()
+    assert anterior_distribuidora == [("anterior_distribuidora",)]
+    assert anterior_nacional == [("anterior_nacional",)]
 
