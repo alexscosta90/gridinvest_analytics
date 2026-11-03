@@ -1,83 +1,134 @@
-# GridInvest Analytics
+# GridInvest Analytics | Pipeline de Dados e Dashboard
 
-O **GridInvest Analytics** analisa os investimentos das distribuidoras de energia elétrica no Brasil a partir de dados públicos da ANEEL. O dashboard compara valores planejados e realizados, acompanha investimento por unidade consumidora e mostra como os recursos se distribuem entre tipos de obra.
+Pipeline de dados e dashboard analítico para explorar investimentos planejados e realizados pelas distribuidoras de energia elétrica no Brasil, a partir de bases públicas da ANEEL.
 
-**Dashboard público:** [gridinvestanalytics.streamlit.app](https://gridinvestanalytics.streamlit.app/)
+[![Abrir dashboard público](https://img.shields.io/badge/Acessar-dashboard-FF4B4B?logo=streamlit&logoColor=white)](https://gridinvestanalytics.streamlit.app/)
 
-## Fontes e licença dos dados
+## Prévia do dashboard
 
-- [PDD — Plano de Desenvolvimento da Distribuição](https://dadosabertos.aneel.gov.br/dataset/pdd)
-- [INDGER — Indicadores Gerenciais da Distribuição](https://dadosabertos.aneel.gov.br/dataset/indger-indicadores-gerenciais-da-distribuicao), em particular [INDGER — Dados Comerciais (CSV)](https://dadosabertos.aneel.gov.br/dataset/indger-indicadores-gerenciais-da-distribuicao/resource/fd10c9d4-cb76-4020-a322-e79afb13eaf7)
+<p align="center">
+  <img src="assets/telas/tela1.png" alt="Captura de tela 1 do dashboard GridInvest Analytics" width="900">
+</p>
 
-As páginas da ANEEL indicam a [Open Data Commons Open Database License (ODbL) 1.0](https://opendatacommons.org/licenses/odbl/1-0/) para esses conjuntos. Atribuição: **Dados: ANEEL, PDD e INDGER — Dados Comerciais.** O banco derivado de publicação inclui os links das fontes e da licença no aviso de atribuição; os metadados das tabelas registram as fontes e a licença. A redistribuição de bancos derivados deve observar os termos de atribuição e compartilhamento da ODbL; consulte a licença para as condições completas. A atribuição não implica endosso pela ANEEL.
+<p align="center">
+  <img src="assets/telas/tela2.png" alt="Captura de tela 2 do dashboard GridInvest Analytics" width="900">
+</p>
+
+[![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![DuckDB](https://img.shields.io/badge/DuckDB-anal%C3%ADtico-FFF000?logo=duckdb&logoColor=black)](https://duckdb.org/)
+[![Streamlit](https://img.shields.io/badge/Streamlit-dashboard-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io/)
+[![Pandas](https://img.shields.io/badge/Pandas-tabelas-150458?logo=pandas&logoColor=white)](https://pandas.pydata.org/)
+[![Altair](https://img.shields.io/badge/Altair-gr%C3%A1ficos-5276A7)](https://altair-viz.github.io/)
+
+## O que é possível analisar?
+
+- Investimentos planejados e realizados pelas distribuidoras.
+- Taxa de execução do investimento planejado e diferenças financeiras.
+- Comparativo das dez distribuidoras da coorte fixa.
+- Investimento realizado por unidade consumidora (R$/UC).
+- Composição do investimento por Expansão, Melhoria, Renovação e outros tipos.
+- Comparação dos indicadores nos anos de referência disponíveis: 2023, 2024 e 2025, selecionados pelo filtro do dashboard.
+
+A coorte é fixa: reúne as dez distribuidoras com mais unidades consumidoras ativas em dezembro de 2025. O dashboard permite selecionar o ano de referência, mas não apresenta uma página independente de série temporal.
+
+## Páginas do dashboard
+
+| Página | O que apresenta |
+|---|---|
+| **Visão Geral** | Totais planejados e realizados, taxa de execução e quantidade de distribuidoras; ranking financeiro e composição por tipo de investimento. |
+| **Comparativo Top 10** | Ranking por investimento realizado por UC, cards individuais e detalhes financeiros das distribuidoras da coorte. |
+| **Investimento por UC** | Maiores e menores valores de R$/UC, total de UCs ativas, indicador agregado da coorte, ranking, dispersão e tabela comparativa. |
+| **Planejado x Realizado** | Totais, percentual de execução e diferenças; colunas agrupadas e tabela por distribuidora. |
+| **Perfil de Investimentos** | Totais e composição por tipo, participação por categoria e comparação entre distribuidoras. |
+
+As descrições refletem as páginas implementadas. As consultas usam os MARTS descritos na especificação em [`specs/dashboard.md`](specs/dashboard.md).
 
 ## Arquitetura
 
 ```mermaid
 flowchart LR
-    PDD[CSV PDD ANEEL] --> RAW[RAW: dados de origem]
-    INDGER[CSV INDGER ANEEL] --> RAW
-    RAW --> REFINED[REFINED: tipos e validações]
-    REFINED --> MARTS[MARTS: indicadores]
-    MARTS --> DB[(DuckDB)]
-    DB --> DASH[Dashboard Streamlit]
+    PDD["CSV PDD ANEEL"] --> RAW["RAW: dados de origem"]
+    INDGER["CSV INDGER ANEEL"] --> RAW
+    RAW --> REFINED["REFINED: tipos e validações"]
+    REFINED --> MARTS["MARTS: indicadores analíticos"]
+    MARTS --> DB[("DuckDB")]
+    DB --> DASH["Dashboard Streamlit"]
 ```
 
-- **RAW** preserva os registros e campos de origem.
-- **REFINED** converte campos definidos pelo projeto e sinaliza valores nulos ou inválidos.
-- **MARTS** prepara coorte, rankings e indicadores analíticos em SQL.
-- **Dashboard** consulta as tabelas MARTS em modo somente leitura. Na nuvem, usa o banco reduzido de publicação; localmente, usa `gridinvest.duckdb` por padrão.
+- **RAW** recebe os arquivos de origem sem substituir seus valores.
+- **REFINED** converte campos definidos pelo projeto e registra valores nulos, inválidos e situações que precisam de revisão.
+- **MARTS** aplica regras analíticas e prepara as tabelas consumidas pelo dashboard.
+- **Dashboard** consulta o DuckDB em modo somente leitura. No modo local padrão, usa `gridinvest.duckdb`; no Streamlit Community Cloud, pode usar o banco reduzido de publicação.
 
-## Páginas do dashboard
+As consultas preservam separados os escopos nacional e `top10`. Valores ausentes ou inválidos não são tratados como zero; zero válido permanece distinto de indisponibilidade. R$/UC representa intensidade de investimento por unidade consumidora, não eficiência operacional nem valor recebido individualmente pelo consumidor.
 
-As páginas compartilham o filtro de ano (2023, 2024 e 2025) e uma coorte fixa das dez distribuidoras com mais unidades consumidoras ativas em dezembro de 2025.
+## Fontes e licença dos dados
 
-1. **Visão Geral** — mostra totais planejados e realizados, taxa de execução e quantidade de distribuidoras. Compara o ranking financeiro por distribuidora e a composição em Expansão, Melhoria e Renovação.
-2. **Comparativo Top 10** — ordena as dez distribuidoras por investimento realizado por unidade consumidora (R$/UC) e apresenta detalhes de investimento, posições, unidades consumidoras e execução financeira.
-3. **Investimento por UC** — apresenta maior e menor R$/UC, UCs ativas e indicador agregado da coorte (investimento total dividido pelo total de UCs), além de ranking em barras, dispersão e tabela.
-4. **Planejado x Realizado** — compara totais planejados e realizados, percentual de execução e diferenças absoluta e percentual, por distribuidora.
-5. **Perfil de Investimentos** — mostra totais e composição por Expansão, Melhoria, Renovação e outros tipos, com participação e comparativos por distribuidora.
+As fontes usadas pelo pipeline são conjuntos públicos da ANEEL:
 
-Os cálculos mantêm escopos nacional e `top10` separados. Valores ausentes, inválidos ou com cobertura incompleta são indicados como indisponíveis, e não como zero. Um zero válido permanece distinto de um valor ausente. R$/UC mede intensidade de investimento por unidade consumidora; não representa eficiência operacional nem valor recebido individualmente pelos consumidores.
+- [PDD — Plano de Desenvolvimento da Distribuição](https://dadosabertos.aneel.gov.br/dataset/pdd)
+- [INDGER — Indicadores Gerenciais da Distribuição](https://dadosabertos.aneel.gov.br/dataset/indger-indicadores-gerenciais-da-distribuicao)
+- [INDGER — Dados Comerciais (CSV)](https://dadosabertos.aneel.gov.br/dataset/indger-indicadores-gerenciais-da-distribuicao/resource/fd10c9d4-cb76-4020-a322-e79afb13eaf7)
+
+As páginas dos conjuntos indicam a [Open Data Commons Open Database License (ODbL) 1.0](https://opendatacommons.org/licenses/odbl/1-0/). Atribuição dos dados: **ANEEL — PDD e INDGER, Dados Comerciais**. A ANEEL não endossa este projeto. A redistribuição de bases derivadas deve observar as condições de atribuição e compartilhamento da ODbL; consulte o texto da licença para os termos completos. O banco de publicação inclui um aviso de atribuição e comentários de metadados com as fontes e a licença.
 
 ## Tecnologias
 
-- Python 3.12 ou superior e [uv](https://docs.astral.sh/uv/) para ambiente e dependências.
-- DuckDB para armazenamento e consultas analíticas.
-- Streamlit para o dashboard; Pandas e Altair para tabelas e visualizações.
-- SQL para construção dos MARTS; pytest e Ruff para testes e análise estática.
+| Ferramenta | Função no projeto |
+|---|---|
+| [Python](https://www.python.org/) | Implementação do pipeline, acesso aos dados, regras de análise e aplicação. |
+| [uv](https://docs.astral.sh/uv/) | Gerenciamento do ambiente e das dependências, registradas em `pyproject.toml` e `uv.lock`. |
+| [DuckDB](https://duckdb.org/) | Banco analítico local e de publicação; o dashboard abre as conexões em modo somente leitura. |
+| SQL | Construção das tabelas MARTS. |
+| [Streamlit](https://streamlit.io/) | Interface interativa do dashboard. |
+| [Pandas](https://pandas.pydata.org/) | Preparação e apresentação tabular dos dados. |
+| [Altair](https://altair-viz.github.io/) | Construção dos gráficos interativos. |
+| [pytest](https://docs.pytest.org/) | Testes automatizados do pipeline, banco e dashboard. |
+| [Ruff](https://docs.astral.sh/ruff/) | Verificações estáticas do código Python. |
 
-As dependências diretas e suas versões resolvidas estão declaradas em `pyproject.toml` e `uv.lock`.
-
-## Estrutura principal
+## Estrutura do repositório
 
 ```text
-assets/logos/       marcas institucionais e logos de distribuidoras
-dashboard/          aplicação Streamlit, páginas, acesso a dados e visuais
-pipeline/           ingestão e transformações RAW/REFINED/MARTS
-raw/                arquivos CSV de entrada locais (não versionados)
-scripts/            geração do banco reduzido para publicação
-specs/              especificações do pipeline e do dashboard
-sql/marts/          consultas de criação dos MARTS
-tests/              testes automatizados
-artifacts/deploy/   banco reduzido local (ignorado pelo Git)
+assets/logos/       Logo institucional e logos das distribuidoras
+dashboard/          Aplicação Streamlit, páginas, consultas e componentes visuais
+pipeline/           Ingestão e transformações RAW, REFINED e MARTS
+raw/                CSVs de origem locais; não versionados
+scripts/            Geração e validação do banco reduzido para publicação
+specs/              Especificações do pipeline e do dashboard
+sql/marts/          Consultas SQL que constroem os MARTS
+tests/              Testes automatizados
+artifacts/deploy/   Artefatos locais de publicação; ignorados pelo Git
 ```
 
 ## Executar localmente
 
-Pré-requisitos: Python 3.12 ou superior e `uv`. Na raiz do repositório, instale as dependências:
+### Pré-requisitos
+
+- Python 3.12 ou superior
+- [uv](https://docs.astral.sh/uv/)
+
+Na raiz do repositório, instale as dependências do projeto e do grupo de desenvolvimento:
 
 ```powershell
 uv sync --all-groups
 ```
 
-Para executar o dashboard com o banco de desenvolvimento `gridinvest.duckdb` na raiz:
+### Abrir o dashboard
+
+O modo local padrão procura o banco de desenvolvimento `gridinvest.duckdb` na raiz do repositório e não realiza download:
 
 ```powershell
 uv run python -m streamlit run dashboard/app.py
 ```
 
-O pipeline lê `raw/pdd-distribuicao-aneel.csv` e `raw/indger-dados-comerciais.csv`; os arquivos de origem precisam ser obtidos nos portais da ANEEL. O projeto não os baixa automaticamente. Execute as etapas na ordem indicada:
+### Executar o pipeline
+
+Obtenha os CSVs nos portais oficiais da ANEEL e salve-os localmente com estes nomes:
+
+- `raw/pdd-distribuicao-aneel.csv`
+- `raw/indger-dados-comerciais.csv`
+
+O projeto não baixa esses arquivos automaticamente. Na raiz do repositório, execute as etapas na ordem abaixo:
 
 ```powershell
 uv run python -m pipeline.ingestao
@@ -86,50 +137,57 @@ uv run python -c "from pipeline.refined import transformar_pdd, transformar_indg
 uv run python -c "from pipeline.marts import executar_mart_01, executar_mart_02, executar_mart_03, executar_mart_04, executar_mart_05, executar_mart_06, executar_mart_07, executar_mart_08; [f() for f in (executar_mart_01, executar_mart_02, executar_mart_03, executar_mart_04, executar_mart_05, executar_mart_06, executar_mart_07, executar_mart_08)]"
 ```
 
-Para executar a suíte de testes e o Ruff:
+### Testes e Ruff
 
 ```powershell
 uv run python -m pytest
 uv run ruff check .
 ```
 
-## Banco DuckDB e dados locais
+## Banco DuckDB e publicação
 
-`gridinvest.duckdb` é criado pelo pipeline e não é versionado. Não o adicione ao repositório. O arquivo original contém camadas RAW e REFINED que não são necessárias ao dashboard publicado.
+O banco `gridinvest.duckdb` é gerado localmente pelo pipeline, não é versionado e **não deve ser adicionado ao repositório**. Ele contém dados das camadas RAW e REFINED, que não são necessárias para o dashboard publicado.
 
-Para gerar o banco reduzido, com apenas as tabelas MARTS necessárias às cinco páginas:
+Para gerar o banco reduzido usado na publicação:
 
 ```powershell
 uv run python scripts/build_dashboard_db.py
 ```
 
-O script lê a origem em modo somente leitura e salva `artifacts/deploy/gridinvest_dashboard.duckdb` com seu aviso de atribuição. A pasta `artifacts/` e bancos DuckDB estão ignorados pelo Git.
+O script lê o banco de origem em modo somente leitura e gera `artifacts/deploy/gridinvest_dashboard.duckdb`, junto com o aviso `gridinvest_dashboard.ATTRIBUTION.md`. O artefato contém apenas as tabelas MARTS selecionadas para o dashboard, sem as camadas RAW e REFINED. A pasta `artifacts/` e arquivos DuckDB são ignorados pelo Git.
 
-## Streamlit Community Cloud
+### Streamlit Community Cloud
 
-O dashboard está publicado em [gridinvestanalytics.streamlit.app](https://gridinvestanalytics.streamlit.app/). O projeto usa Python 3.12 e o Community Cloud instala as dependências resolvidas em `uv.lock`.
+O dashboard está publicado em [gridinvestanalytics.streamlit.app](https://gridinvestanalytics.streamlit.app/). O repositório é [alexscosta90/gridinvest_analytics](https://github.com/alexscosta90/gridinvest_analytics).
 
-O banco local de desenvolvimento não é publicado. O banco reduzido de publicação contém somente as tabelas necessárias do schema MARTS, sem RAW ou REFINED. Para atualizar esse banco, gere e valide o artefato localmente, calcule seu SHA-256 e anexe o banco e o aviso de atribuição a uma **GitHub Release**. Depois de criar a release, configure o endereço HTTPS real do asset e o hash aprovado nos Secrets do app do Streamlit Cloud. Não há URL fixa de release neste README; use a URL do asset que efetivamente foi publicado.
+O banco local de desenvolvimento não é enviado ao Cloud. Para atualizar os dados publicados:
+
+1. Gere e valide localmente o banco reduzido e o aviso de atribuição.
+2. Anexe ambos a uma GitHub Release do repositório.
+3. Configure nos Secrets do app no Streamlit Community Cloud a URL HTTPS do asset do banco e o SHA-256 do arquivo publicado.
+
+O README não fixa uma URL de release: use a URL real do asset da release criada.
 
 | Variável | Funcionamento |
 |---|---|
-| `GRIDINVEST_DB_URL` | URL HTTPS do banco de publicação. Quando definida, o app baixa o arquivo para o diretório temporário do sistema, fora do repositório. |
-| `GRIDINVEST_DB_SHA256` | SHA-256 hexadecimal esperado; obrigatório com `GRIDINVEST_DB_URL`. O app valida o arquivo antes de consultá-lo. |
-| `GRIDINVEST_DB_PATH` | Caminho opcional para selecionar um banco local alternativo, por exemplo o artefato reduzido em `artifacts/deploy/`. Não realiza download. |
+| `GRIDINVEST_DB_URL` | URL HTTPS do banco reduzido. Quando definida, o app baixa o arquivo para um diretório temporário fora do repositório. |
+| `GRIDINVEST_DB_SHA256` | Hash SHA-256 esperado em hexadecimal; usado para validar o arquivo baixado e obrigatório quando `GRIDINVEST_DB_URL` está configurada. |
+| `GRIDINVEST_DB_PATH` | Caminho local opcional para selecionar outro banco, como `artifacts/deploy/gridinvest_dashboard.duckdb`. Não inicia um download. |
 
-No modo local padrão, sem `GRIDINVEST_DB_URL` ou `GRIDINVEST_DB_PATH`, o app usa `gridinvest.duckdb` e não faz download. No Community Cloud, configure `GRIDINVEST_DB_URL` e `GRIDINVEST_DB_SHA256` como Secrets de nível raiz; o Streamlit os expõe como variáveis de ambiente. O acesso ao banco é somente leitura. Não coloque URLs privadas, credenciais ou arquivos DuckDB no Git.
+Sem `GRIDINVEST_DB_URL` e `GRIDINVEST_DB_PATH`, o app usa `gridinvest.duckdb` da raiz do projeto e não baixa arquivos. No Cloud, configure `GRIDINVEST_DB_URL` e `GRIDINVEST_DB_SHA256` como Secrets de nível raiz. Em todos os modos, o dashboard abre o banco em modo somente leitura.
 
-Para testar localmente o banco reduzido antes de publicá-lo:
+Para testar localmente o banco reduzido antes da publicação:
 
 ```powershell
 $env:GRIDINVEST_DB_PATH = (Resolve-Path .\artifacts\deploy\gridinvest_dashboard.duckdb).Path
 uv run python -m streamlit run dashboard/app.py
 ```
 
-## Período de referência e limitações
+## Período e limitações
 
-- Os anos exibidos são 2023, 2024 e 2025; a coorte é fixa pela quantidade de UCs ativas em dezembro de 2025, não um ranking recalculado para cada ano.
-- Os dados e formatos dependem das publicações da ANEEL. Novas cargas devem ser conferidas contra o esquema esperado pelo pipeline.
-- CSVs de entrada e o banco local não acompanham o clone; cada ambiente que for executar o pipeline precisa obter as fontes e preparar seus próprios dados.
-- Ausências, duplicidades, valores inválidos e cobertura incompleta na origem podem deixar indicadores indisponíveis.
-- A UF e a região exibidas são referências principais da concessão, não a lista completa de municípios atendidos.
+- O filtro do dashboard oferece os anos de 2023 a 2025; o ano inicial selecionado é 2025.
+- A coorte das dez distribuidoras é definida pelas unidades consumidoras ativas de dezembro de 2025 e permanece fixa ao selecionar outros anos.
+- A disponibilidade e o formato dos dados dependem das publicações da ANEEL. Os CSVs não acompanham o repositório e precisam ser obtidos separadamente para executar o pipeline.
+- Ausências, duplicidades, valores inválidos ou cobertura incompleta podem tornar indicadores indisponíveis. O dashboard sinaliza essas situações em vez de assumir zero.
+- UF e região são referências principais da concessão e não representam a lista completa de municípios atendidos.
+- R$/UC é uma razão entre investimento e unidades consumidoras; não deve ser interpretado isoladamente como eficiência operacional.
