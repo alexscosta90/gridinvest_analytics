@@ -14,6 +14,7 @@ from dashboard.metadata import (
     TIPOS_INVESTIMENTO_EXIBIDOS,
     nome_marca,
 )
+from dashboard.responsive import renderizar_grade_metricas
 from dashboard.visuals import formatar_bilhoes, rotulo_grafico
 
 CORES_TIPOS = {
@@ -305,14 +306,23 @@ def renderizar_pagina(dados: dict[str, Any], ano: int) -> None:
             "violet",
         ),
     )
-    with st.container(horizontal=True):
-        for titulo, valor, icone, cor in titulos:
-            with st.container(border=True):
-                st.badge(titulo, icon=icone, color=cor)
-                st.metric(titulo, formatar_bilhoes(valor), border=False)
+    renderizar_grade_metricas(
+        [
+            {
+                "title": titulo,
+                "label": titulo,
+                "value": formatar_bilhoes(valor),
+                "icon": icone,
+                "color": cor,
+            }
+            for titulo, valor, icone, cor in titulos
+        ],
+        chave="perfil-investimentos",
+        colunas_desktop=4,
+    )
 
     rosca, barras = _construir_graficos(resultado)
-    col_rosca, col_barras = st.columns([0.8, 1.5], gap="large")
+    col_rosca, col_barras = st.columns([0.8, 1.5], gap="large", wrap=True)
     with col_rosca.container(border=True):
         st.markdown("**Participação por tipo**")
         if rosca is None:
@@ -322,6 +332,7 @@ def renderizar_pagina(dados: dict[str, Any], ano: int) -> None:
                 rosca,
                 width="stretch",
                 alt="Participação percentual dos tipos de investimento no total realizado",
+                key="gridinvest-chart-perfil-rosca",
             )
     with col_barras.container(border=True):
         st.markdown("**Investimentos por distribuidora**")
@@ -329,6 +340,7 @@ def renderizar_pagina(dados: dict[str, Any], ano: int) -> None:
             barras,
             width="stretch",
             alt="Comparação do investimento realizado por tipo entre as dez distribuidoras",
+            key="gridinvest-chart-perfil-distribuidoras",
         )
 
     opcoes = [item["cnpj"] for item in resultado["ordenados"]]
@@ -342,27 +354,27 @@ def renderizar_pagina(dados: dict[str, Any], ano: int) -> None:
     )
     detalhe = resultado["detalhes"][selecionada]
     st.markdown(f"**Composição de {detalhe['rotulo']} · {ano}**")
-    with st.container(horizontal=True):
-        for tipo in TIPOS_INVESTIMENTO_EXIBIDOS:
-            valor = detalhe["valores"][tipo]
-            participacao = (
-                f"{valor * Decimal(100) / detalhe['total']:.2f}%"
-                if valor is not None
-                and detalhe["total"] is not None
-                and detalhe["total"] > 0
-                else "Não disponível"
-            )
-            with st.container(border=True):
-                st.badge(
-                    tipo,
-                    color={
-                        "Expansão": "blue",
-                        "Melhoria": "green",
-                        "Renovação": "violet",
-                    }[tipo],
-                )
-                st.metric("Investimento", formatar_reais(valor), border=False)
-                st.caption(f"{participacao} do total realizado")
+    renderizar_grade_metricas(
+        [
+            {
+                "title": tipo,
+                "label": "Investimento",
+                "value": formatar_bilhoes(detalhe["valores"][tipo]),
+                "color": {
+                    "Expansão": "blue",
+                    "Melhoria": "green",
+                    "Renovação": "violet",
+                }[tipo],
+                "caption": (
+                    f"Valor integral: {formatar_reais(detalhe['valores'][tipo])} · "
+                    f"{_formatar_participacao_tipo(detalhe, tipo)} do total realizado"
+                ),
+            }
+            for tipo in TIPOS_INVESTIMENTO_EXIBIDOS
+        ],
+        chave="perfil-detalhe",
+        colunas_desktop=3,
+    )
     outros = detalhe["valores"]["Outros tipos"]
     if outros not in (None, Decimal(0)):
         uf = METADADOS_POR_CNPJ.get(selecionada, {}).get("uf")
@@ -370,3 +382,11 @@ def renderizar_pagina(dados: dict[str, Any], ano: int) -> None:
         st.caption(
             f"Outros tipos · {nome}{f' ({uf})' if uf else ''}: {formatar_reais(outros)}"
         )
+
+
+def _formatar_participacao_tipo(detalhe: dict[str, Any], tipo: str) -> str:
+    valor = detalhe["valores"][tipo]
+    total = detalhe["total"]
+    if valor is None or total is None or total <= 0:
+        return "Não disponível"
+    return f"{valor * Decimal(100) / total:.2f}%"

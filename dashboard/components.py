@@ -11,6 +11,8 @@ from dashboard.metadata import (
     TIPOS_INVESTIMENTO_EXIBIDOS,
     nome_marca,
 )
+from dashboard.responsive import renderizar_grade_metricas
+from dashboard.visuals import formatar_bilhoes
 
 
 def renderizar_card_distribuidora(
@@ -27,7 +29,7 @@ def renderizar_card_distribuidora(
     logo = resolver_logo(cnpj)
 
     if compacto:
-        with st.container(horizontal=True, vertical_alignment="center"):
+        with st.container(horizontal=True, vertical_alignment="center", wrap=True):
             st.badge(f"#{distribuidora['posicao_ranking']}", color="blue")
             if logo:
                 st.image(str(logo), width=42, alt=f"Logo de {marca}")
@@ -53,7 +55,17 @@ def renderizar_card_distribuidora(
         if distribuidora.get("status_realizado") == "valid"
         else None
     )
-    st.metric("Investido", formatar_reais(realizado), border=destaque)
+    renderizar_grade_metricas(
+        [
+            {
+                "label": "Investimento realizado",
+                "value": formatar_bilhoes(realizado),
+                "help": f"Valor integral: {formatar_reais(realizado)}",
+            }
+        ],
+        chave=f"comparativo-{cnpj}",
+        colunas_desktop=1,
+    )
     st.caption(f"Posição fixa por UCs: #{distribuidora['posicao_coorte']}")
 
     with st.expander("Ver detalhes", expanded=False):
@@ -124,13 +136,20 @@ def renderizar_card_distribuidora(
             if valor_uc and valor_uc.get("status") == "valid"
             else None
         )
-        st.metric(
-            "Investimento realizado por UC",
-            formatar_reais(valor_por_uc),
-            help=(
-                "Intensidade média de investimento por unidade consumidora; "
-                "não é um valor individual recebido pelo consumidor."
-            ),
+        renderizar_grade_metricas(
+            [
+                {
+                    "label": "Investimento realizado por UC",
+                    "value": formatar_reais(valor_por_uc),
+                    "help": (
+                        "Intensidade média de investimento por unidade consumidora; "
+                        "não é um valor individual recebido pelo consumidor."
+                    ),
+                }
+            ],
+            chave=f"comparativo-detalhe-{cnpj}",
+            colunas_desktop=1,
+            borda_card=False,
         )
 
 

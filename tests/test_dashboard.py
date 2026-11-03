@@ -637,20 +637,21 @@ def test_home_atualiza_ano_e_mantem_os_graficos_principais(
     assert "Tabela ordenável pelas colunas numéricas" not in codigo_app
     assert "A coorte permanece fixa:" not in codigo_app
     assert "não uma medida isolada de eficiência operacional" not in codigo_app
-    assert len(app.dataframe) == 0
-    assert len(app.table) == 1
-    assert len(app.table[0].value) == 10
-    assert list(app.table[0].value.columns) == [
+    assert len(app.dataframe) == 1
+    assert len(app.table) == 0
+    assert len(app.dataframe[0].value) == 10
+    assert list(app.dataframe[0].value.columns) == [
         "Posição",
+        "Logo",
         "Distribuidora",
         "Investimento realizado (R$ bi)",
         "Execução financeira (%)",
         "Realizado por UC (R$/UC)",
     ]
-    assert list(app.table[0].value["Posição"]) == list(range(1, 11))
+    assert list(app.dataframe[0].value["Posição"]) == list(range(1, 11))
     assert all(
         "data:image/svg+xml;base64," in valor
-        for valor in app.table[0].value["Distribuidora"]
+        for valor in app.dataframe[0].value["Logo"]
     )
     assert len(app.expander) == 0
     assert app.selectbox(key="ano_referencia").value == 2025
@@ -661,7 +662,7 @@ def test_home_atualiza_ano_e_mantem_os_graficos_principais(
         "Investimento realizado"
     ).run()
     assert not app.exception
-    assert len(app.table[0].value) == 10
+    assert len(app.dataframe[0].value) == 10
 
     app.selectbox(key="ano_referencia").select(2024).run()
     assert not app.exception
@@ -884,11 +885,16 @@ def test_navegacao_investimento_por_uc_renderiza_dez_distribuidoras(
         "Investimento por Unidade Consumidora" in item.value for item in app.subheader
     )
     assert len(app.metric) == 4
-    assert len(app.table) == 1
-    assert len(app.table[0].value) == 10
-    assert list(app.table[0].value["Posição R$/UC"]) == [
+    assert len(app.dataframe) == 1
+    assert len(app.table) == 0
+    assert len(app.dataframe[0].value) == 10
+    assert list(app.dataframe[0].value["Posição R$/UC"]) == [
         f"#{posicao}" for posicao in range(1, 11)
     ]
+    assert all(
+        valor.startswith("data:image/svg+xml;base64,")
+        for valor in app.dataframe[0].value["Logo"]
+    )
     assert any("Ranking de Investimento por UC" in item.value for item in app.subheader)
     assert any(
         "Investimento total versus R$/UC" in item.value for item in app.subheader
@@ -898,7 +904,7 @@ def test_navegacao_investimento_por_uc_renderiza_dez_distribuidoras(
     app.selectbox(key="ano_referencia").select(2024).run()
     assert not app.exception
     assert app.selectbox(key="ano_referencia").value == 2024
-    assert len(app.table[0].value) == 10
+    assert len(app.dataframe[0].value) == 10
 
 
 def test_planejado_realizado_prepara_coorte_e_reconcilia_mart01_mart04(
